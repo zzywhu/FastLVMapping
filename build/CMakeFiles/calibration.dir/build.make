@@ -153,6 +153,7 @@ calibration: /usr/lib/x86_64-linux-gnu/libopencv_videostab.so.4.2.0
 calibration: /usr/lib/x86_64-linux-gnu/libopencv_viz.so.4.2.0
 calibration: /usr/lib/x86_64-linux-gnu/libopencv_xobjdetect.so.4.2.0
 calibration: /usr/lib/x86_64-linux-gnu/libopencv_xphoto.so.4.2.0
+calibration: libcommon_lib.so
 calibration: /usr/lib/x86_64-linux-gnu/libpcl_apps.so
 calibration: /usr/lib/x86_64-linux-gnu/libpcl_outofcore.so
 calibration: /usr/lib/x86_64-linux-gnu/libpcl_people.so

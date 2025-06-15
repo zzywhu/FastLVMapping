@@ -1,56 +1,149 @@
-#ifndef CALIB_H
-#define CALIB_H
+#pragma once
 
 #include <string>
 #include <vector>
-#include <Eigen/Dense>
 #include <opencv2/opencv.hpp>
-#include <pcl/point_cloud.h>
+#include <pcl/point_cloud.h>  // Added specific point cloud header
 #include <pcl/point_types.h>
-#include "ImageProcess/imageprocess.h"
+#include <Eigen/Dense>
+#include <memory>
 
+namespace lvmapping {
+
+/**
+ * @class CalibProcessor
+ * @brief Main processor for LiDAR-Camera calibration and point cloud colorization
+ */
 class CalibProcessor {
 public:
-    CalibProcessor();
-    ~CalibProcessor();
-
     /**
-     * Process fisheye images, undistort them, interpolate camera poses,
-     * and project point cloud onto each image
-     * 
-     * @param image_folder Path to directory containing fisheye images
-     * @param trajectory_file Path to trajectory file (time, x, y, z, qx, qy, qz, qw)
-     * @param pcd_file Path to point cloud file
-     * @param output_folder Path to output directory for projected images
-     * @return Success flag
+     * @brief Default constructor
      */
-    bool processImagesAndPointCloud(const std::string& image_folder, 
+    CalibProcessor();
+    
+    /**
+     * @brief Destructor
+     */
+    ~CalibProcessor();
+    
+    /**
+     * @brief Initialize calibration with a config file
+     * @param config_file Path to config file
+     * @return True if successful
+     */
+    bool initialize(const std::string& config_file);
+    
+    /**
+     * @brief Set visualization tool path
+     * @param tool_path Path to visualization tool
+     */
+    void setVisualizationTool(const std::string& tool_path);
+    
+    /**
+     * @brief Main processing function - run all calibration and colorization steps
+     * @return True if successful
+     */
+    bool run();
+    
+    /**
+     * @brief Run preprocessing only (generate index maps and projections)
+     * @return True if successful
+     */
+    bool runPreprocessing();
+    
+    /**
+     * @brief Process images and point cloud to update extrinsic calibration and colorize point cloud
+     * @param image_folder Folder containing camera images
+     * @param trajectory_file File containing LiDAR trajectory
+     * @param pcd_file Point cloud file to colorize
+     * @param output_folder Folder for output results
+     * @return true if processing was successful, false otherwise
+     */
+    bool processImagesAndPointCloud(const std::string& image_folder,
                                    const std::string& trajectory_file,
                                    const std::string& pcd_file,
                                    const std::string& output_folder);
 
-    // Add new method to set visualization tool
-    void setVisualizationTool(const std::string& tool) { visualization_tool_ = tool; }
+    /**
+     * @brief Preprocess images and point cloud data for further processing
+     * 
+     * @param image_folder Folder containing camera images
+     * @param trajectory_file File containing LiDAR trajectory
+     * @param pcd_file Point cloud file to process
+     * @param output_folder Folder for output results
+     * @return true if preprocessing was successful, false otherwise
+     */
+    bool preprocess(const std::string& image_folder,
+                   const std::string& trajectory_file,
+                   const std::string& pcd_file,
+                   const std::string& output_folder);
 
 private:
-    // Helper function to read calibration parameters from config
+    // Processing steps
     bool loadCalibrationParameters(const std::string& config_file);
+    bool saveCalibrationParameters(const std::string& config_file);
+    bool loadDatasets();
+    bool preprocess(); // Keep the no-parameter version for internal use
+    bool processImagesAndPointCloud(); // Keep the no-parameter version for internal use
+    bool colorizeWithFisheyeImages();
 
-    // Camera intrinsic parameters
+    // Helper methods  
+    bool interpolatePose(double timestamp, 
+                        const std::vector<std::pair<double, Eigen::Matrix4d>>& trajectory,
+                        Eigen::Matrix4d& lidar_pose);
+    
+    bool updateExtrinsics(const std::string& match_file,
+                         const std::string& index_file, 
+                         const Eigen::Matrix4d& lidar_pose,
+                         const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud);
+                         
+    bool colorizePointCloud(const cv::Mat& undistorted_img,
+                           const Eigen::Matrix4d& camera_pose,
+                           const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud,
+                           pcl::PointCloud<pcl::PointXYZRGB>::Ptr& colored_cloud,
+                           std::vector<int>& point_color_count,
+                           const std::string& output_folder,
+                           double timestamp);
+    
+    bool processImageFrame(double timestamp, 
+                          const std::string& img_path, 
+                          const Eigen::Matrix4d& lidar_pose,
+                          const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud,
+                          pcl::PointCloud<pcl::PointXYZRGB>::Ptr& colored_cloud,
+                          std::vector<int>& point_color_count,
+                          const std::string& output_folder);
+                          
+    bool saveVisualization(const pcl::PointCloud<pcl::PointXYZRGB>::Ptr& colored_cloud,
+                          const std::vector<int>& point_color_count,
+                          const std::string& output_folder,
+                          const std::string& progress_info);
+    
+    // Data members
     cv::Mat camera_matrix_;
     cv::Mat newcamera_matrix_;
+    cv::Mat resizecamera_matrix_;
     cv::Mat dist_coeffs_;
     
-    // Extrinsics: transform from LiDAR to camera
-    Eigen::Matrix4d T_lidar_camera_;
+    Eigen::Matrix4d T_lidar_camera_;      // Initial LiDAR to camera transformation
+    Eigen::Matrix4d T_lidar_camera_update_; // Updated LiDAR to camera transformation
     
-    // Config file path
-    std::string config_path_;
-
-    std::string visualization_tool_ = "pcl_viewer";  // Default visualization tool
+    std::string visualization_tool_;
+    
+    // Dataset holders
+    std::vector<std::pair<double, Eigen::Matrix4d>> trajectory_;
+    std::vector<std::pair<double, std::string>> image_files_;
+    std::vector<std::pair<double, std::string>> selected_images_;
+    pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_;
+    
+    // Parameters
+    std::string config_file_;
+    std::string image_folder_;
+    std::string trajectory_file_;
+    std::string pcd_file_;
+    std::string output_folder_;
 };
 
-#endif // CALIB_H
+} // namespace lvmapping
 
 
 

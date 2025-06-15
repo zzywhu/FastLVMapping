@@ -1,0 +1,66 @@
+%YAML:1.0
+# Camera parameters
+camera_matrix: !!opencv-matrix
+  rows: 3
+  cols: 3
+  dt: f
+  data: [1045.115003, 0, 1503.226466, 0, 1045.231008, 1483.015172, 0, 0, 1]
+distortion_coefficients: !!opencv-matrix
+  rows: 1
+  cols: 4
+  dt: f
+  data: [-0.076904, 0.003767, -0.001645, 0.000225]
+
+new_camera_matrix: !!opencv-matrix
+  rows: 3
+  cols: 3
+  dt: f
+  data: [1500.0, 0, 1500.0, 0, 1500.0, 1500.0, 0, 0, 1]
+
+resize_camera_matrix: !!opencv-matrix
+  rows: 3
+  cols: 3
+  dt: f
+  data: [400.0, 0, 400.0, 0, 400.0, 400.0, 0, 0, 1]
+  
+extrinsics: !!opencv-matrix
+  rows: 4
+  cols: 4
+  dt: d
+  data: [-0.00297174, 0.99999, -0.00331239, 0.0642425, 0.00781543, -0.00328908, -0.999964, 0.281943, -0.999965, -0.00299752, -0.00780558, 0.0424095, 0, 0, 0, 1]
+
+# Point cloud parameters
+point_cloud_params:
+   min_depth: 0.1          # Minimum depth for visualization (meters)
+   max_depth: 50.0         # Maximum depth for visualization (meters)
+   neighborhood_size: 3    # Size of pixel neighborhood for depth checking
+
+# Projection parameters
+projection_params:
+   image_width: 3000       # Width of undistorted image
+   image_height: 3000      # Height of undistorted image
+   focal_length: 1500      # Focal length for pinhole projection
+   image_center_x: 1500    # Image center X for pinhole projection
+   image_center_y: 1500    # Image center Y for pinhole projection
+   valid_image_start_x: 500  # Start X of valid region in the image
+   valid_image_start_y: 500  # Start Y of valid region in the image
+   valid_image_end_x: 2500   # End X of valid region in the image
+   valid_image_end_y: 2500   # End Y of valid region in the image
+
+# PnP parameters
+pnp_params:
+   max_rotation_diff: 0.5     # Maximum allowed rotation difference
+   max_translation_diff: 0.5  # Maximum allowed translation difference
+   reprojection_error: 8.0    # Reprojection error threshold for RANSAC
+   min_inlier_count: 10       # Minimum number of inliers required
+   ransac_iterations: 100     # Number of RANSAC iterations
+   confidence: 0.99           # RANSAC confidence level
+
+# Output parameters
+output_params:
+   visualization_tool: ""   # Path to visualization tool executable
+   viz_frequency: 10        # How often to update visualization
+
+# Processing parameters
+processing_params:
+   img_sampling_step: 2    # Step size for image sampling (e.g., 2 means every other image)

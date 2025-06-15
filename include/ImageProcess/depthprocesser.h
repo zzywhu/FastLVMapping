@@ -1,5 +1,4 @@
-#ifndef DEPTH_COMPLETION_HPP
-#define DEPTH_COMPLETION_HPP
+#pragma once
 
 #include <opencv2/opencv.hpp>
 #include <pcl/point_cloud.h>
@@ -8,75 +7,71 @@
 #include <algorithm>
 #include <iostream>
 
+namespace lvmapping {
+
 /**
  * @class Kernels
- * @brief 提供形态学操作所需的各种卷积核
+ * @brief Provides various convolution kernels for morphological operations
  */
 class Kernels {
 public:
-    cv::Mat FULL_KERNEL_3;
-    cv::Mat FULL_KERNEL_5;
-    cv::Mat FULL_KERNEL_7;
-    cv::Mat FULL_KERNEL_9;
-    cv::Mat FULL_KERNEL_31;
-
+    cv::Mat full_kernel_3;
+    cv::Mat full_kernel_5;
+    cv::Mat full_kernel_7;
+    cv::Mat full_kernel_9;
+    cv::Mat full_kernel_31;
+    
     /**
-     * @brief 构造函数，初始化基本的卷积核
+     * @brief Constructor initializes basic kernels
      */
     Kernels() {
-        FULL_KERNEL_3 = cv::Mat::ones(3, 3, CV_8U);
-        FULL_KERNEL_5 = cv::Mat::ones(5, 5, CV_8U);
-        FULL_KERNEL_7 = cv::Mat::ones(7, 7, CV_8U);
-        FULL_KERNEL_9 = cv::Mat::ones(9, 9, CV_8U);
-        FULL_KERNEL_31 = cv::Mat::ones(31, 31, CV_8U);
+        // Initialize standard square kernels
+        full_kernel_3 = cv::Mat::ones(3, 3, CV_8U);
+        full_kernel_5 = cv::Mat::ones(5, 5, CV_8U);
+        full_kernel_7 = cv::Mat::ones(7, 7, CV_8U);
+        full_kernel_9 = cv::Mat::ones(9, 9, CV_8U);
+        full_kernel_31 = cv::Mat::ones(31, 31, CV_8U);
     }
-
+    
     /**
-     * @brief 生成3x3十字形卷积核
-     * @return 3x3十字形卷积核
+     * @brief Generate a 3x3 cross-shaped kernel
      */
-    cv::Mat cross_kernel_3() {
-        cv::Mat kernel = (cv::Mat_<uint8_t>(3, 3) <<
+    cv::Mat crossKernel3() const {
+        return (cv::Mat_<uint8_t>(3, 3) << 
             0, 1, 0,
             1, 1, 1,
             0, 1, 0);
-        return kernel;
     }
-
+    
     /**
-     * @brief 生成5x5十字形卷积核
-     * @return 5x5十字形卷积核
+     * @brief Generate a 5x5 cross-shaped kernel
      */
-    cv::Mat cross_kernel_5() {
-        cv::Mat kernel = (cv::Mat_<uint8_t>(5, 5) <<
+    cv::Mat crossKernel5() const {
+        return (cv::Mat_<uint8_t>(5, 5) << 
             0, 0, 1, 0, 0,
             0, 0, 1, 0, 0,
             1, 1, 1, 1, 1,
             0, 0, 1, 0, 0,
             0, 0, 1, 0, 0);
-        return kernel;
     }
-
+    
     /**
-     * @brief 生成5x5菱形卷积核
-     * @return 5x5菱形卷积核
+     * @brief Generate a 5x5 diamond-shaped kernel
      */
-    cv::Mat diamond_kernel_5() {
-        cv::Mat kernel = (cv::Mat_<uint8_t>(5, 5) <<
+    cv::Mat diamondKernel5() const {
+        return (cv::Mat_<uint8_t>(5, 5) << 
             0, 0, 1, 0, 0,
             0, 1, 1, 1, 0,
             1, 1, 1, 1, 1,
             0, 1, 1, 1, 0,
             0, 0, 1, 0, 0);
-        return kernel;
     }
-
+    
     /**
-     * @brief 生成7x7十字形卷积核
-     * @return 7x7十字形卷积核
+     * @brief Generate a 7x7 cross-shaped kernel
      */
-    cv::Mat cross_kernel_7() {
-        cv::Mat kernel = (cv::Mat_<uint8_t>(7, 7) <<
+    cv::Mat crossKernel7() const {
+        return (cv::Mat_<uint8_t>(7, 7) << 
             0, 0, 0, 1, 0, 0, 0,
             0, 0, 0, 1, 0, 0, 0,
             0, 0, 0, 1, 0, 0, 0,
@@ -84,15 +79,13 @@ public:
             0, 0, 0, 1, 0, 0, 0,
             0, 0, 0, 1, 0, 0, 0,
             0, 0, 0, 1, 0, 0, 0);
-        return kernel;
     }
-
+    
     /**
-     * @brief 生成7x7菱形卷积核
-     * @return 7x7菱形卷积核
+     * @brief Generate a 7x7 diamond-shaped kernel
      */
-    cv::Mat diamond_kernel_7() {
-        cv::Mat kernel = (cv::Mat_<uint8_t>(7, 7) <<
+    cv::Mat diamondKernel7() const {
+        return (cv::Mat_<uint8_t>(7, 7) << 
             0, 0, 0, 1, 0, 0, 0,
             0, 0, 1, 1, 1, 0, 0,
             0, 1, 1, 1, 1, 1, 0,
@@ -100,223 +93,255 @@ public:
             0, 1, 1, 1, 1, 1, 0,
             0, 0, 1, 1, 1, 0, 0,
             0, 0, 0, 1, 0, 0, 0);
-        return kernel;
     }
 };
 
 /**
  * @class DepthMapProcessor
- * @brief 深度图补全的核心处理类
+ * @brief Core processor for depth map completion
+ * 
+ * This class applies advanced morphological operations to fill gaps
+ * in sparse depth maps from LiDAR projections.
  */
 class DepthMapProcessor {
-private:
-    Kernels kernels;
-    float max_depth;
-
 public:
     /**
-     * @brief 构造函数
-     * @param max_depth 最大深度值（用于深度反转）
+     * @brief Constructor
+     * @param max_depth Maximum depth value for normalization
      */
-    DepthMapProcessor(float max_depth = 100.0f) : max_depth(max_depth) {}
-
+    DepthMapProcessor(float max_depth = 100.0f) : max_depth_(max_depth) {}
+    
     /**
-     * @brief 深度图补全的主要算法
-     * @param main_image 原始RGB图像（在此实现中未使用，保留以保持API一致性）
-     * @param depth_map 原始深度图
-     * @return 补全后的深度图
+     * @brief Process a sparse depth map to fill gaps
+     * @param main_image RGB image (unused, kept for API compatibility)
+     * @param depth_map Input sparse depth map
+     * @return Processed depth map with gaps filled
      */
-    cv::Mat create_map(const cv::Mat& main_image, const cv::Mat& depth_map) {
-        cv::Mat depths_in = depth_map.clone();
-        depths_in.convertTo(depths_in, CV_32F);
+    cv::Mat createMap(const cv::Mat& main_image, const cv::Mat& depth_map) {
+        // Convert depth map to floating point
+        cv::Mat depths = depth_map.clone();
+        depths.convertTo(depths, CV_32F);
         
-        // 根据深度区间计算掩码 - 保留原始深度值的区间划分
-        cv::Mat valid_pixels_near, valid_pixels_med, valid_pixels_far;
-        cv::inRange(depths_in, 0.1f, 15.0f, valid_pixels_near);
-        cv::inRange(depths_in, 15.0f, 30.0f, valid_pixels_med);
-        cv::threshold(depths_in, valid_pixels_far, 30.0f, 255, cv::THRESH_BINARY);
-
-        // 将布尔掩码转换为浮点掩码（0.0或1.0）
-        valid_pixels_near.convertTo(valid_pixels_near, CV_32F, 1.0/255.0);
-        valid_pixels_med.convertTo(valid_pixels_med, CV_32F, 1.0/255.0);
-        valid_pixels_far.convertTo(valid_pixels_far, CV_32F, 1.0/255.0);
-
-        // 移除步骤1中的深度反转，直接使用原始深度
-        cv::Mat s1_depths = depths_in.clone();
-        cv::Mat valid_pixels;
-        cv::threshold(depths_in, valid_pixels, 0.1f, 255, cv::THRESH_BINARY);
-        valid_pixels.convertTo(valid_pixels, CV_32F, 1.0/255.0);
+        // Apply multi-stage processing pipeline
+        cv::Mat processed_depths = processDepthMap(depths);
         
-        // 不再需要深度反转循环
-        // for (int y = 0; y < s1_inverted_depths.rows; y++) {
-        //     for (int x = 0; x < s1_inverted_depths.cols; x++) { 
-        //         if (valid_pixels.at<float>(y, x) > 0.5f) {
-        //             s1_inverted_depths.at<float>(y, x) = max_depth - s1_inverted_depths.at<float>(y, x);
-        //         }
-        //     }
-        // }
+        return processed_depths;
+    }
 
-        // 步骤2：根据不同深度范围应用不同的形态学扩张
-        cv::Mat dilated_far, dilated_med, dilated_near;
-        cv::Mat far_depths = s1_depths.mul(valid_pixels_far);
-        cv::Mat med_depths = s1_depths.mul(valid_pixels_med);
-        cv::Mat near_depths = s1_depths.mul(valid_pixels_near);
+private:
+    float max_depth_;
+    Kernels kernels_;
+    
+    /**
+     * @brief Main depth map processing pipeline
+     * @param depths Input depth map
+     * @return Processed depth map
+     */
+    cv::Mat processDepthMap(const cv::Mat& depths) {
+        // 1. Segment depth map by ranges
+        cv::Mat near_mask, med_mask, far_mask;
+        segmentDepthRanges(depths, near_mask, med_mask, far_mask);
         
-        cv::dilate(far_depths, dilated_far, kernels.cross_kernel_3());
-        cv::dilate(med_depths, dilated_med, kernels.diamond_kernel_5());
-        cv::dilate(near_depths, dilated_near, kernels.diamond_kernel_7());
-
-        // 更新扩张后的掩码
-        cv::threshold(dilated_near, valid_pixels_near, 0.1f, 1.0f, cv::THRESH_BINARY);
-        cv::threshold(dilated_med, valid_pixels_med, 0.1f, 1.0f, cv::THRESH_BINARY);
-        cv::threshold(dilated_far, valid_pixels_far, 0.1f, 1.0f, cv::THRESH_BINARY);
-
-        // 合并不同深度区间的扩张结果
-        cv::Mat s2_dilated_depths = s1_depths.clone();
-        for (int y = 0; y < s2_dilated_depths.rows; y++) {
-            for (int x = 0; x < s2_dilated_depths.cols; x++) {
-                if (valid_pixels_far.at<float>(y, x) > 0.5f) {
-                    s2_dilated_depths.at<float>(y, x) = dilated_far.at<float>(y, x);
-                }
-                if (valid_pixels_med.at<float>(y, x) > 0.5f) {
-                    s2_dilated_depths.at<float>(y, x) = dilated_med.at<float>(y, x);
-                }
-                if (valid_pixels_near.at<float>(y, x) > 0.5f) {
-                    s2_dilated_depths.at<float>(y, x) = dilated_near.at<float>(y, x);
-                }
-            }
-        }
-
-        // 步骤3：形态学闭操作填充小空洞
-        cv::Mat s3_closed_depths;
-        cv::morphologyEx(s2_dilated_depths, s3_closed_depths, cv::MORPH_CLOSE, kernels.FULL_KERNEL_5);
-
-        // 步骤4：中值滤波降噪
-        cv::Mat s4_blurred_depths = s3_closed_depths.clone();
+        // 2. Apply range-adaptive morphology
+        cv::Mat dilated_depths = applyRangeMorphology(depths, near_mask, med_mask, far_mask);
+        
+        // 3. Fill small holes
+        cv::Mat closed_depths;
+        cv::morphologyEx(dilated_depths, closed_depths, cv::MORPH_CLOSE, kernels_.full_kernel_5);
+        
+        // 4. Apply median filtering to denoise
+        cv::Mat filtered_depths = applyMedianFilter(closed_depths);
+        
+        // 5. Fill top regions
+        cv::Mat extended_depths = fillTopRegions(filtered_depths);
+        
+        // 6. Final smoothing
+        cv::Mat smoothed_depths = applyFinalSmoothing(extended_depths);
+        
+        return smoothed_depths;
+    }
+    
+    /**
+     * @brief Segment depth map into near, medium, and far ranges
+     */
+    void segmentDepthRanges(const cv::Mat& depths, cv::Mat& near_mask, cv::Mat& med_mask, cv::Mat& far_mask) {
+        // Create range masks (0.1-15m, 15-30m, >30m)
+        cv::inRange(depths, 0.1f, 15.0f, near_mask);
+        cv::inRange(depths, 15.0f, 30.0f, med_mask);
+        cv::threshold(depths, far_mask, 30.0f, 255, cv::THRESH_BINARY);
+        
+        // Convert to floating point masks (0.0 or 1.0)
+        near_mask.convertTo(near_mask, CV_32F, 1.0/255.0);
+        med_mask.convertTo(med_mask, CV_32F, 1.0/255.0);
+        far_mask.convertTo(far_mask, CV_32F, 1.0/255.0);
+    }
+    
+    /**
+     * @brief Apply different morphological operations based on depth range
+     */
+    cv::Mat applyRangeMorphology(const cv::Mat& depths, 
+                                const cv::Mat& near_mask, 
+                                const cv::Mat& med_mask, 
+                                const cv::Mat& far_mask) {
+        // Extract depth ranges
+        cv::Mat near_depths = depths.mul(near_mask);
+        cv::Mat med_depths = depths.mul(med_mask);
+        cv::Mat far_depths = depths.mul(far_mask);
+        
+        // Apply different dilation kernels based on depth range
+        cv::Mat dilated_near, dilated_med, dilated_far;
+        cv::dilate(near_depths, dilated_near, kernels_.diamondKernel7());
+        cv::dilate(med_depths, dilated_med, kernels_.diamondKernel5());
+        cv::dilate(far_depths, dilated_far, kernels_.crossKernel3());
+        
+        // Create masks for the dilated regions
+        cv::Mat near_dilated_mask, med_dilated_mask, far_dilated_mask;
+        cv::threshold(dilated_near, near_dilated_mask, 0.1f, 1.0f, cv::THRESH_BINARY);
+        cv::threshold(dilated_med, med_dilated_mask, 0.1f, 1.0f, cv::THRESH_BINARY);
+        cv::threshold(dilated_far, far_dilated_mask, 0.1f, 1.0f, cv::THRESH_BINARY);
+        
+        // Merge results with priority (near > medium > far)
+        cv::Mat result = depths.clone();
+        
+        // Apply far depth first (lowest priority)
+        result = result.mul(1.0 - far_dilated_mask) + dilated_far;
+        
+        // Apply medium depth (medium priority)
+        result = result.mul(1.0 - med_dilated_mask) + dilated_med;
+        
+        // Apply near depth (highest priority)
+        result = result.mul(1.0 - near_dilated_mask) + dilated_near;
+        
+        return result;
+    }
+    
+    /**
+     * @brief Apply median filtering to valid depths
+     */
+    cv::Mat applyMedianFilter(const cv::Mat& depths) {
+        cv::Mat result = depths.clone();
+        cv::Mat valid_mask;
+        cv::threshold(depths, valid_mask, 0.1f, 1.0f, cv::THRESH_BINARY);
+        
+        // Apply median blur
         cv::Mat blurred;
-        cv::medianBlur(s3_closed_depths, blurred, 5);
-
-        cv::threshold(s3_closed_depths, valid_pixels, 0.1f, 1.0f, cv::THRESH_BINARY);
-        for (int y = 0; y < s4_blurred_depths.rows; y++) {
-            for (int x = 0; x < s4_blurred_depths.cols; x++) {
-                if (valid_pixels.at<float>(y, x) > 0.5f) {
-                    s4_blurred_depths.at<float>(y, x) = blurred.at<float>(y, x);
-                }
-            }
-        }
-
-        // 步骤5：创建顶部掩码并扩张填充空白区域
-        cv::Mat top_mask = cv::Mat::ones(depths_in.size(), CV_8U);
+        cv::medianBlur(depths, blurred, 5);
         
-        for (int x = 0; x < s4_blurred_depths.cols; x++) {
+        // Only update valid pixels
+        result = result.mul(1.0 - valid_mask) + blurred.mul(valid_mask);
+        
+        return result;
+    }
+    
+    /**
+     * @brief Fill top regions of the depth map
+     */
+    cv::Mat fillTopRegions(const cv::Mat& depths) {
+        cv::Mat result = depths.clone();
+        
+        // Create top mask
+        cv::Mat top_mask = cv::Mat::ones(depths.size(), CV_8U);
+        
+        // Find top rows with no depth
+        for (int x = 0; x < depths.cols; x++) {
             int top_row = 0;
-            while (top_row < s4_blurred_depths.rows && s4_blurred_depths.at<float>(top_row, x) <= 0.1f) {
+            while (top_row < depths.rows && depths.at<float>(top_row, x) <= 0.1f) {
                 top_row++;
             }
             
+            // Mark these as part of the top region
             for (int y = 0; y < top_row; y++) {
                 top_mask.at<uchar>(y, x) = 0;
             }
         }
-
-        cv::Mat valid_pixels_float;
-        cv::threshold(s4_blurred_depths, valid_pixels_float, 0.1f, 1.0f, cv::THRESH_BINARY);
-        valid_pixels_float.convertTo(valid_pixels, CV_8U, 255);
         
-        cv::Mat empty_pixels;
-        cv::bitwise_not(valid_pixels, empty_pixels);
-        cv::bitwise_and(empty_pixels, top_mask, empty_pixels);
-
+        // Find empty regions
+        cv::Mat valid_mask, empty_mask;
+        cv::threshold(depths, valid_mask, 0.1f, 255, cv::THRESH_BINARY);
+        cv::bitwise_not(valid_mask, empty_mask);
+        cv::bitwise_and(empty_mask, top_mask, empty_mask);
+        
+        // Dilate to fill empty regions
         cv::Mat dilated;
-        cv::dilate(s4_blurred_depths, dilated, kernels.FULL_KERNEL_7);
+        cv::dilate(depths, dilated, kernels_.full_kernel_7);
         
-        cv::Mat s5_dilated_depths = s4_blurred_depths.clone();
-        for (int y = 0; y < s5_dilated_depths.rows; y++) {
-            for (int x = 0; x < s5_dilated_depths.cols; x++) {
-                if (empty_pixels.at<uchar>(y, x) > 0) {
-                    s5_dilated_depths.at<float>(y, x) = dilated.at<float>(y, x);
+        // Update empty regions with dilated values
+        for (int y = 0; y < result.rows; y++) {
+            for (int x = 0; x < result.cols; x++) {
+                if (empty_mask.at<uchar>(y, x) > 0) {
+                    result.at<float>(y, x) = dilated.at<float>(y, x);
                 }
             }
         }
-
-        // 步骤6：扩展深度到顶部像素
-        cv::Mat s6_extended_depths = s5_dilated_depths.clone();
         
-        for (int x = 0; x < s5_dilated_depths.cols; x++) {
+        return result;
+    }
+    
+    /**
+     * @brief Apply final smoothing and gap filling
+     */
+    cv::Mat applyFinalSmoothing(const cv::Mat& depths) {
+        cv::Mat result = depths.clone();
+        cv::Mat valid_mask, empty_mask, top_mask;
+        
+        // Create top mask (same as in fillTopRegions)
+        top_mask = cv::Mat::ones(depths.size(), CV_8U);
+        for (int x = 0; x < depths.cols; x++) {
             int top_row = 0;
-            while (top_row < s5_dilated_depths.rows && s5_dilated_depths.at<float>(top_row, x) <= 0.1f) {
+            while (top_row < depths.rows && depths.at<float>(top_row, x) <= 0.1f) {
                 top_row++;
             }
-            
-            if (top_row < s5_dilated_depths.rows) {
-                float top_value = s5_dilated_depths.at<float>(top_row, x);
-                for (int y = 0; y < top_row; y++) {
-                    s6_extended_depths.at<float>(y, x) = top_value;
-                }
+            for (int y = 0; y < top_row; y++) {
+                top_mask.at<uchar>(y, x) = 0;
             }
         }
-
-        // 步骤7：多次扩张和平滑处理
-        cv::Mat s7_blurred_depths = s6_extended_depths.clone();
         
-        for (int i = 0; i < 6; i++) {
-            // 创建空白像素掩码
-            cv::threshold(s7_blurred_depths, valid_pixels_float, 0.1f, 1.0f, cv::THRESH_BINARY);
-            valid_pixels_float.convertTo(valid_pixels, CV_8U, 255);
-            cv::bitwise_not(valid_pixels, empty_pixels);
-            cv::bitwise_and(empty_pixels, top_mask, empty_pixels);
+        // Multiple iterations of fill and smooth
+        for (int i = 0; i < 3; i++) {  // Reduced to 3 iterations for efficiency
+            // Create empty pixel mask
+            cv::threshold(result, valid_mask, 0.1f, 255, cv::THRESH_BINARY);
+            cv::bitwise_not(valid_mask, empty_mask);
+            cv::bitwise_and(empty_mask, top_mask, empty_mask);
             
-            // 扩张
-            cv::dilate(s7_blurred_depths, dilated, kernels.FULL_KERNEL_31);
+            // Fill with dilated values
+            cv::Mat dilated;
+            cv::dilate(result, dilated, kernels_.full_kernel_9);  // Reduced kernel size
             
-            // 用扩张值填充空白像素
-            for (int y = 0; y < s7_blurred_depths.rows; y++) {
-                for (int x = 0; x < s7_blurred_depths.cols; x++) {
-                    if (empty_pixels.at<uchar>(y, x) > 0) {
-                        s7_blurred_depths.at<float>(y, x) = dilated.at<float>(y, x);
+            for (int y = 0; y < result.rows; y++) {
+                for (int x = 0; x < result.cols; x++) {
+                    if (empty_mask.at<uchar>(y, x) > 0) {
+                        result.at<float>(y, x) = dilated.at<float>(y, x);
                     }
                 }
             }
         }
         
-        // 应用中值滤波
-        cv::threshold(s7_blurred_depths, valid_pixels_float, 0.1f, 1.0f, cv::THRESH_BINARY);
-        valid_pixels_float.convertTo(valid_pixels, CV_8U, 255);
-        cv::bitwise_and(valid_pixels, top_mask, valid_pixels);
+        // Final median blur
+        cv::threshold(result, valid_mask, 0.1f, 255, cv::THRESH_BINARY);
+        cv::Mat blurred;
+        cv::medianBlur(result, blurred, 5);
         
-        cv::medianBlur(s7_blurred_depths, blurred, 5);
-        for (int y = 0; y < s7_blurred_depths.rows; y++) {
-            for (int x = 0; x < s7_blurred_depths.cols; x++) {
-                if (valid_pixels.at<uchar>(y, x) > 0) {
-                    s7_blurred_depths.at<float>(y, x) = blurred.at<float>(y, x);
+        for (int y = 0; y < result.rows; y++) {
+            for (int x = 0; x < result.cols; x++) {
+                if (valid_mask.at<uchar>(y, x) > 0) {
+                    result.at<float>(y, x) = blurred.at<float>(y, x);
                 }
             }
         }
         
-        // 应用高斯滤波
-        cv::GaussianBlur(s7_blurred_depths, blurred, cv::Size(5, 5), 0);
-        for (int y = 0; y < s7_blurred_depths.rows; y++) {
-            for (int x = 0; x < s7_blurred_depths.cols; x++) {
-                if (valid_pixels.at<uchar>(y, x) > 0) {
-                    s7_blurred_depths.at<float>(y, x) = blurred.at<float>(y, x);
+        // Final gaussian blur
+        cv::GaussianBlur(result, blurred, cv::Size(3, 3), 0);
+        
+        for (int y = 0; y < result.rows; y++) {
+            for (int x = 0; x < result.cols; x++) {
+                if (valid_mask.at<uchar>(y, x) > 0) {
+                    result.at<float>(y, x) = blurred.at<float>(y, x);
                 }
             }
         }
-
-        // 步骤8：反转深度回原始形式
-        cv::Mat s8_inverted_depths = s7_blurred_depths.clone();
-        cv::threshold(s8_inverted_depths, valid_pixels_float, 0.1f, 1.0f, cv::THRESH_BINARY);
         
-        // for (int y = 0; y < s8_inverted_depths.rows; y++) {
-        //     for (int x = 0; x < s8_inverted_depths.cols; x++) {
-        //         if (valid_pixels_float.at<float>(y, x) > 0.5f) {
-        //             s8_inverted_depths.at<float>(y, x) = max_depth - s8_inverted_depths.at<float>(y, x);
-        //         }
-        //     }
-        // }
-
-        // 直接返回s7_blurred_depths作为最终结果
-        return s7_blurred_depths;
+        return result;
     }
 };
-#endif // DEPTH_COMPLETION_HPP
+
+} // namespace lvmapping

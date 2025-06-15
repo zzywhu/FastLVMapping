@@ -43,25 +43,32 @@ set(SOURCES
     # Add other source files here
 )
 
-# Create executable
-add_executable(fast_lv_mapping src/run.cpp ${SOURCES})
-
-# Link libraries
-target_link_libraries(fast_lv_mapping
-    ${OpenCV_LIBS}
-    ${PCL_LIBRARIES}
-    stdc++fs  # For std::filesystem
-)
-
-# Install
-install(TARGETS fast_lv_mapping
-    RUNTIME DESTINATION bin
-)
 
 # Add another executable for calibration if needed
+
+add_library(common_lib
+    src/calib.cpp
+    src/config.cpp  # Added config.cpp
+    # ... other common source files
+)
+
+# If you have a preprocessing target, also add it there
+if(TARGET preprocessing)
+    target_sources(preprocessing PRIVATE src/config.cpp)
+endif()
+
 add_executable(calibration src/run.cpp ${SOURCES})
 target_link_libraries(calibration
     ${OpenCV_LIBS}
+    common_lib
+    ${PCL_LIBRARIES}
+    stdc++fs
+)
+
+add_executable(preprocess src/preprocess.cpp ${SOURCES})
+target_link_libraries(preprocess
+    ${OpenCV_LIBS}
+    common_lib
     ${PCL_LIBRARIES}
     stdc++fs
 )

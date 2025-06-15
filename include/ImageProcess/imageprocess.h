@@ -29,6 +29,12 @@ public:
     cv::Mat fillHoles(const cv::Mat& depthImage, int kernelSize);
     cv::Mat fillHolesFast(const cv::Mat& input);
 
+    // Modified to also return an index matrix
+    cv::Mat projectPinhole(const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud, bool colorize = false);
+    
+    // New method that returns both the projected image and an index mapping
+    std::pair<cv::Mat, cv::Mat> projectPinholeWithIndices(const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud, bool colorize = false);
+
 private:
     // Basic camera parameters
     int img_width;

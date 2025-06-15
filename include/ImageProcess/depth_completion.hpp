@@ -1,86 +1,119 @@
 #include <opencv2/opencv.hpp>
 #include <vector>
 
-//*******************full kernels********************//
-// 保持最小内核不变
-cv::Mat full_kernel3x3 = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
-// 减小其他所有矩形内核
-cv::Mat full_kernel5x5 = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3)); // 从5x5减小到3x3
-cv::Mat full_kernel7x7 = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3)); // 从5x5减小到3x3
-cv::Mat full_kernel9x9 = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5)); // 从7x7减小到5x5
-// 极大减小最大内核，减少过度平滑
-cv::Mat full_kernel31x31 = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(9, 9)); // 从15x15减小到9x9
+namespace lvmapping {
 
-//*******************cross kernel********************//
-// 减小交叉内核
-cv::Mat cross_kernel3x3 = cv::getStructuringElement(cv::MORPH_CROSS, cv::Size(3, 3));
-cv::Mat cross_kernel5x5 = cv::getStructuringElement(cv::MORPH_CROSS, cv::Size(3, 3)); // 从5x5减小到3x3
-cv::Mat cross_kernel7x7 = cv::getStructuringElement(cv::MORPH_CROSS, cv::Size(5, 5)); // 从7x7减小到5x5
+/**
+ * @class DepthCompletion 
+ * @brief Efficient depth completion algorithm
+ */
+class DepthCompletion {
+public:
+    /**
+     * @brief Process a sparse depth map to fill in gaps
+     * @param lidar_depth Input sparse depth map
+     * @param img_width Image width (optional)
+     * @param img_height Image height (optional)
+     * @return Dense depth map
+     */
+    static cv::Mat process(const cv::Mat& lidar_depth, int img_width = 0, int img_height = 0) {
+        // Initialize kernels with efficient sizes
+        initializeKernels();
+        
+        // Clone input depth map
+        cv::Mat depth = lidar_depth.clone();
 
-//*******************diamond kernel********************//
-// 线性内核保持不变
-cv::Mat one_kernel3x3 = (cv::Mat_<uint8_t>(3,3) << 0, 1, 0,
-    0, 1, 0,
-    0, 1, 0);
+        // Remove very small values and normalize
+        cv::Mat mask = (depth > 0.1);
+        
+        // Optional depth inversion (from far=bright to near=bright)
+        cv::subtract(100.0, depth, depth, mask);
+        
+        // Apply fast multi-step processing
+        applyMorphologicalOperations(depth);
+        
+        // Invert back to original depth representation
+        mask = (depth > 0.1);
+        cv::subtract(100.0, depth, depth, mask);
+        
+        return depth;
+    }
 
-// 设计更小的菱形内核，减少填充强度
-cv::Mat diamond_kernel5x5 = (cv::Mat_<uint8_t>(3,3) << 0, 1, 0,
-                                                       1, 1, 1,
-                                                       0, 1, 0); // 从5x5减小到3x3
-
-// 减少7x7菱形内核为5x5
-cv::Mat diamond_kernel7x7 = (cv::Mat_<uint8_t>(5,5) << 0, 0, 1, 0, 0,
-                                                        0, 1, 1, 1, 0,
-                                                        1, 1, 1, 1, 1,
-                                                        0, 1, 1, 1, 0, 
-                                                        0, 0, 1, 0, 0); // 从7x7减小到5x5
-
-//*******************sharpen kernel********************//
-// 增强锐化内核的效果，增加中心权重
-cv::Mat sharpen_kernel3x3 = (cv::Mat_<char>(3,3) << 0, -1, 0,
-    -1, 7, -1,  // 从6增强到7，进一步增加中心像素权重
-    0, -1, 0);
-
-//*******************depth completion********************//
-
-cv::Mat depth_completion(const cv::Mat& lidar_depth, int img_width, int img_height)
-{
-    // double time_start = clock();
-    cv::Mat depth_ = lidar_depth.clone();
-
-    cv::Mat mask;
-    cv::Mat dilated_map;
-    // //depth inversion
-    mask = (depth_ > 0.1);
-    cv::subtract(100.0, depth_, depth_, mask);
+private:
+    // Kernels
+    static cv::Mat full_kernel3x3_;
+    static cv::Mat full_kernel5x5_;
+    static cv::Mat diamond_kernel5x5_;
     
-    // 使用最小的菱形内核进行初始扩张
-    cv::dilate(depth_, depth_, diamond_kernel5x5); // 现在是3x3
+    /**
+     * @brief Initialize optimized morphological kernels
+     */
+    static void initializeKernels() {
+        static bool initialized = false;
+        
+        if (!initialized) {
+            // Create kernels only once
+            full_kernel3x3_ = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+            full_kernel5x5_ = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5));
+            
+            // Create optimized diamond kernel
+            diamond_kernel5x5_ = (cv::Mat_<uint8_t>(5, 5) << 
+                0, 0, 1, 0, 0,
+                0, 1, 1, 1, 0,
+                1, 1, 1, 1, 1,
+                0, 1, 1, 1, 0,
+                0, 0, 1, 0, 0);
+                
+            initialized = true;
+        }
+    }
     
-    // 使用最小的内核进行孔洞闭合
-    cv::morphologyEx(depth_, depth_, cv::MORPH_CLOSE, full_kernel3x3);
+    /**
+     * @brief Apply efficient morphological operations
+     * @param depth Depth map to process (in-place)
+     */
+    static void applyMorphologicalOperations(cv::Mat& depth) {
+        cv::Mat mask, dilated_map;
+        
+        // 1. Initial dilation with small optimized kernel
+        cv::dilate(depth, depth, diamond_kernel5x5_);
+        
+        // 2. Fill small holes with morphological closing
+        cv::morphologyEx(depth, depth, cv::MORPH_CLOSE, full_kernel3x3_);
+        
+        // 3. Fill small gaps
+        mask = (depth < 0.1);
+        cv::dilate(depth, dilated_map, full_kernel3x3_);
+        dilated_map.copyTo(depth, mask);
+        
+        // 4. Fill larger gaps with targeted dilation
+        mask = (depth < 0.1);
+        cv::dilate(depth, dilated_map, full_kernel5x5_);
+        dilated_map.copyTo(depth, mask);
+        
+        // 5. Denoise with median filter
+        cv::Mat filtered;
+        cv::medianBlur(depth, filtered, 3);
+        
+        mask = (depth > 0.1);
+        filtered.copyTo(depth, mask);
+        
+        // 6. Edge-preserving smoothing with small Gaussian
+        cv::GaussianBlur(depth, filtered, cv::Size(3, 3), 0);
+        filtered.copyTo(depth, mask);
+    }
+};
 
-    // 小孔填充 - 使用最小的内核
-    mask = (depth_ < 0.1);
-    cv::dilate(depth_, dilated_map, full_kernel3x3); // 从5x5减小到3x3  
-    dilated_map.copyTo(depth_, mask);
-    
-    // 大孔填充 - 使用中等大小的内核
-    mask = (depth_ < 0.1);
-    cv::dilate(depth_, dilated_map, full_kernel9x9); // 从15x15减小到9x9
-    dilated_map.copyTo(depth_, mask);
-    
-    // 使用最小的中值滤波核
-    cv::medianBlur(depth_, depth_, 3);
-    
-    // 使用最小的高斯模糊核
-    mask = (depth_ > 0.1);
-    cv::GaussianBlur(depth_, dilated_map, cv::Size(3, 3), 0);
-    dilated_map.copyTo(depth_, mask);
-    
-    // //depth inversion
-    mask = (depth_ > 0.1);
-    cv::subtract(100.0, depth_, depth_, mask);
-    
-    return depth_;
+// Initialize static members
+cv::Mat DepthCompletion::full_kernel3x3_;
+cv::Mat DepthCompletion::full_kernel5x5_;
+cv::Mat DepthCompletion::diamond_kernel5x5_;
+
+/**
+ * @brief Legacy function maintained for backwards compatibility
+ */
+cv::Mat depth_completion(const cv::Mat& lidar_depth, int img_width, int img_height) {
+    return DepthCompletion::process(lidar_depth, img_width, img_height);
 }
+
+} // namespace lvmapping

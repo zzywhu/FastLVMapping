@@ -197,3 +197,113 @@ cv::Mat ImageProcess::fillHolesFast(const cv::Mat& input) {
     
     return result;
 }
+
+cv::Mat ImageProcess::projectPinhole(const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud, bool colorize) {
+    // Call the new method and return just the image
+    return projectPinholeWithIndices(cloud, colorize).first;
+}
+
+std::pair<cv::Mat, cv::Mat> ImageProcess::projectPinholeWithIndices(const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud, bool isinter) {
+    // 设置图像尺寸
+    const int IMG_HEIGHT = 800;  // 图像高度
+    const int IMG_WIDTH = 800;   // 图像宽度
+    
+    // 设置相机内参
+    const float fx = 400.0f;     // 焦距x
+    const float fy = 400.0f;     // 焦距y
+    const float cx = IMG_WIDTH / 2.0f;   // 光心x坐标
+    const float cy = IMG_HEIGHT / 2.0f;  // 光心y坐标
+    
+    // 创建强度图，初始化为0
+    cv::Mat intensityImage = cv::Mat::zeros(IMG_HEIGHT, IMG_WIDTH, CV_32F);
+    
+    // 创建索引图，初始化为-1（表示没有对应点云点）
+    cv::Mat indexMap = cv::Mat(IMG_HEIGHT, IMG_WIDTH, CV_32S, cv::Scalar(-1));
+    
+    // 如果点云为空，返回空图像
+    if(cloud->size() == 0) {
+        cv::Mat emptyImage = cv::Mat::zeros(IMG_HEIGHT, IMG_WIDTH, CV_8U);
+        return {emptyImage, indexMap};
+    }
+    
+    // 创建深度图，用于处理遮挡
+    cv::Mat depthMap = cv::Mat::zeros(IMG_HEIGHT, IMG_WIDTH, CV_32F);
+    depthMap.setTo(std::numeric_limits<float>::max());  // 初始化为最大值
+    
+    // 投影点云到图像平面
+    for (size_t i = 0; i < cloud->points.size(); ++i) {
+        const auto& p = cloud->points[i];
+        
+        // 只处理相机前方的点（假设相机朝向-x方向）
+        if(p.z < 0) {
+            continue;
+        }
+        
+        // 计算投影点坐标
+        float x = p.x;
+        float y = p.y;
+        float z = p.z;
+        
+        // 针孔投影
+        float depth = z;  // 深度值为x轴距离
+        
+        // 如果深度为0或负数，跳过
+        if(depth <= 0) {
+            continue;
+        }
+        
+        // 计算像素坐标
+        float u = (fx * x / z) + cx;
+        float v = (fy * y / z) + cy;
+        
+        // 检查像素坐标是否在图像范围内
+        if (u >= 0 && u < IMG_WIDTH && v >= 0 && v < IMG_HEIGHT) {
+            // 强制转换为整数坐标
+            int ui = static_cast<int>(u);
+            int vi = static_cast<int>(v);
+            
+            // 处理遮挡（近处的点覆盖远处的点）
+            if (depth < depthMap.at<float>(vi, ui)) {
+                depthMap.at<float>(vi, ui) = depth;
+                intensityImage.at<float>(vi, ui) = p.intensity;
+                indexMap.at<int>(vi, ui) = static_cast<int>(i); // 记录点云索引
+            }
+        }
+    }
+    
+    // 归一化到 [0, 255]
+    double minVal, maxVal;
+    cv::minMaxLoc(intensityImage, &minVal, &maxVal);
+    
+    cv::Mat normalizedImage;
+    // 避免除以零
+    if(maxVal > minVal) {
+        intensityImage.convertTo(normalizedImage, CV_8U, 255.0 / (maxVal - minVal), -minVal * 255.0 / (maxVal - minVal));
+    } else {
+        intensityImage.convertTo(normalizedImage, CV_8U);
+    }
+    
+    // 直方图均衡化
+    cv::equalizeHist(normalizedImage, normalizedImage);
+    
+    // 伽马校正增强对比度
+    cv::Mat gammaImage;
+    normalizedImage.convertTo(gammaImage, CV_32F, 1.0 / 255.0);
+    cv::pow(gammaImage, 0.5, gammaImage);  // γ = 0.5
+    gammaImage.convertTo(normalizedImage, CV_8U, 255);
+    
+    // 将灰度图转换为彩色图像
+    cv::Mat colorImage;
+    cv::cvtColor(normalizedImage, colorImage, cv::COLOR_GRAY2BGR);
+    
+    cv::Mat finalImage;
+    if(isinter) {
+        // 注意：fillHoles需要相应的修改来处理彩色图像
+        cv::Mat filledGray = fillHoles(normalizedImage, 1);
+        cv::cvtColor(filledGray, finalImage, cv::COLOR_GRAY2BGR);
+    } else {
+        finalImage = colorImage;
+    }
+    
+    return {finalImage, indexMap};
+}

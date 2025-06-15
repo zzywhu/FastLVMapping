@@ -25,7 +25,6 @@ CalibProcessor::CalibProcessor() {
     newcamera_matrix_ = config.cameraParams().new_camera_matrix.clone();
     resizecamera_matrix_ = config.cameraParams().resize_camera_matrix.clone();
     dist_coeffs_ = config.cameraParams().distortion_coeffs.clone();
-    
     T_lidar_camera_ = config.calibParams().T_lidar_camera;
     T_lidar_camera_update_ = T_lidar_camera_; // Initialize with the same value
 }
@@ -45,7 +44,6 @@ bool CalibProcessor::loadCalibrationParameters(const std::string& config_file) {
     camera_matrix_ = config.cameraParams().camera_matrix.clone();
     newcamera_matrix_ = config.cameraParams().new_camera_matrix.clone();
     resizecamera_matrix_ = config.cameraParams().resize_camera_matrix.clone();
-    std::cout<<config.cameraParams().resize_camera_matrix<<std::endl;
     dist_coeffs_ = config.cameraParams().distortion_coeffs.clone();
     T_lidar_camera_ = config.calibParams().T_lidar_camera;
     T_lidar_camera_update_ = T_lidar_camera_;

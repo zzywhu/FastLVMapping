@@ -71,11 +71,12 @@ public:
 
     // Processing parameters
     struct ProcessingParams {
-        int img_sampling_step;  // Step size for image sampling (e.g., 2 means every other image)
-        std::string pcd_path;   // Path to point cloud file
-        std::string img_path;   // Path to image directory
-        std::string traj_path;  // Path to trajectory file
-        std::string output_path; // Path for output files
+        std::string img_path;
+        std::string traj_path;
+        std::string pcd_path;
+        std::string output_path;
+        int img_sampling_step;
+        double image_downscale_factor; // Add this field to fix compilation error
     };
 
     // Getters for parameter groups

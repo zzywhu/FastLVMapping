@@ -51,12 +51,13 @@ void Config::setDefaultValues() {
     output_params_.visualization_tool = "";
     output_params_.viz_frequency = 10;
     
-    // Set default processing parameters
+    // Set default processing parameters with meaningful paths
     processing_params_.img_sampling_step = 2;
-    processing_params_.pcd_path = "";
-    processing_params_.img_path = "";
-    processing_params_.traj_path = "";
-    processing_params_.output_path = "";
+    processing_params_.pcd_path = "REQUIRED: Set path to your .pcd file";
+    processing_params_.img_path = "REQUIRED: Set path to your image directory";
+    processing_params_.traj_path = "REQUIRED: Set path to your trajectory file";
+    processing_params_.output_path = "REQUIRED: Set path to your output directory";
+    processing_params_.image_downscale_factor = 1.0; // 1.0 means no downscaling, 2.0 means half resolution
 }
 
 bool Config::loadFromYAML(const std::string& config_file) {
@@ -89,15 +90,26 @@ bool Config::loadFromYAML(const std::string& config_file) {
         }
     }
     
-    // Read paths
+    // Directly read path parameters
+    // NOTE: These need to be read directly from the root level, not from nested sections
     if (fs["pcd_path"].isString())
         processing_params_.pcd_path = fs["pcd_path"].string();
+    
     if (fs["img_path"].isString())
         processing_params_.img_path = fs["img_path"].string();
+    
     if (fs["traj_path"].isString())
         processing_params_.traj_path = fs["traj_path"].string();
+    
     if (fs["output_path"].isString())
         processing_params_.output_path = fs["output_path"].string();
+    
+    // Print loaded paths for debugging
+    std::cout << "Loaded paths from config:" << std::endl;
+    std::cout << "  - Image path: '" << processing_params_.img_path << "'" << std::endl;
+    std::cout << "  - Trajectory path: '" << processing_params_.traj_path << "'" << std::endl;
+    std::cout << "  - Point cloud path: '" << processing_params_.pcd_path << "'" << std::endl;
+    std::cout << "  - Output path: '" << processing_params_.output_path << "'" << std::endl;
     
     // Read other parameters from nested sections
     if (fs["point_cloud_params"].isMap()) {
@@ -137,7 +149,49 @@ bool Config::loadFromYAML(const std::string& config_file) {
     
     // Read processing parameters
     if (fs["processing_params"].isMap()) {
-        fs["processing_params"]["img_sampling_step"] >> processing_params_.img_sampling_step;
+        if (!fs["processing_params"]["img_path"].empty())
+            processing_params_.img_path = fs["processing_params"]["img_path"].string();
+        
+        if (!fs["processing_params"]["traj_path"].empty())
+            processing_params_.traj_path = fs["processing_params"]["traj_path"].string();
+        
+        if (!fs["processing_params"]["pcd_path"].empty())
+            processing_params_.pcd_path = fs["processing_params"]["pcd_path"].string();
+        
+        if (!fs["processing_params"]["output_path"].empty())
+            processing_params_.output_path = fs["processing_params"]["output_path"].string();
+        
+        if (!fs["processing_params"]["img_sampling_step"].empty())
+            fs["processing_params"]["img_sampling_step"] >> processing_params_.img_sampling_step;
+        
+        if (!fs["processing_params"]["image_downscale_factor"].empty())
+            fs["processing_params"]["image_downscale_factor"] >> processing_params_.image_downscale_factor;
+    }
+    
+    // Final path validation check
+    bool paths_valid = true;
+    if (processing_params_.img_path.empty()) {
+        std::cerr << "Warning: Image path is empty!" << std::endl;
+        paths_valid = false;
+    }
+    
+    if (processing_params_.traj_path.empty()) {
+        std::cerr << "Warning: Trajectory path is empty!" << std::endl;
+        paths_valid = false;
+    }
+    
+    if (processing_params_.pcd_path.empty()) {
+        std::cerr << "Warning: Point cloud path is empty!" << std::endl;
+        paths_valid = false;
+    }
+    
+    if (processing_params_.output_path.empty()) {
+        std::cerr << "Warning: Output path is empty!" << std::endl;
+        paths_valid = false;
+    }
+    
+    if (!paths_valid) {
+        std::cerr << "One or more required paths are not properly set in config file: " << config_file << std::endl;
     }
     
     fs.release();
@@ -209,7 +263,12 @@ void Config::saveToYAML(const std::string& config_file) const {
     
     // Save processing parameters
     fs << "processing_params" << "{";
+    fs << "img_path" << processing_params_.img_path;
+    fs << "traj_path" << processing_params_.traj_path;
+    fs << "pcd_path" << processing_params_.pcd_path;
+    fs << "output_path" << processing_params_.output_path;
     fs << "img_sampling_step" << processing_params_.img_sampling_step;
+    fs << "image_downscale_factor" << processing_params_.image_downscale_factor;
     fs << "}";
     
     fs.release();

@@ -1,0 +1,18 @@
+<launch>
+  <!-- Parameters -->
+  <arg name="config_file" default="$(find fast_lv_mapping)/config/default_config.yaml" />
+  <arg name="preprocessing" default="false" doc="Run in preprocessing mode if true"/>
+  
+  <!-- Launch the main node -->
+  <node name="fast_lv_mapping" pkg="fast_lv_mapping" type="fast_lv_mapping_node" output="screen">
+    <param name="config_file" value="$(arg config_file)" />
+    <param name="preprocessing" value="$(arg preprocessing)" />
+  </node>
+  
+  <!-- Launch RViz with our configuration -->
+  <node name="rviz" pkg="rviz" type="rviz" args="-d $(find fast_lv_mapping)/config/rviz_config.rviz" />
+  
+  <!-- Launch a static transform publisher to ensure map frame exists -->
+  <node pkg="tf2_ros" type="static_transform_publisher" name="map_to_world_broadcaster"
+        args="0 0 0 0 0 0 world map" />
+</launch>

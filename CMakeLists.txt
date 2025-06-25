@@ -1,74 +1,94 @@
-cmake_minimum_required(VERSION 3.10)
-project(FastLVMapping)
+cmake_minimum_required(VERSION 3.0.2)
+project(fast_lv_mapping)
 
-# Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3")
 
-# Find required packages
+# 添加编译优化标志
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -DNDEBUG")
+
+# 添加OpenMP支持 - 改进检测和标志设置
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+    add_definitions(-DOPENMP_FOUND=1)
+    message(STATUS "Building with OpenMP support")
+else()
+    add_definitions(-DOPENMP_FOUND=0)
+    message(STATUS "OpenMP not found. Parallel processing disabled.")
+endif()
+
+# 找到必要的包
+find_package(catkin REQUIRED COMPONENTS
+  roscpp
+  std_msgs
+  sensor_msgs
+  nav_msgs
+  geometry_msgs
+  cv_bridge
+  pcl_ros
+  pcl_conversions
+  tf2_ros
+  tf2
+  visualization_msgs
+  image_transport
+)
+
 find_package(OpenCV REQUIRED)
 find_package(PCL REQUIRED)
 find_package(Eigen3 REQUIRED)
-find_package(yaml-cpp REQUIRED)
-find_package(cv_bridge REQUIRED)
-# Find ROS packages
-find_package(catkin REQUIRED COMPONENTS
-  roscpp
-  sensor_msgs
-  std_msgs
-  cv_bridge
+
+# Catkin包设置
+catkin_package(
+  INCLUDE_DIRS include
+  LIBRARIES fast_lv_mapping
+  CATKIN_DEPENDS roscpp std_msgs sensor_msgs nav_msgs geometry_msgs cv_bridge pcl_ros pcl_conversions tf2_ros tf2 visualization_msgs image_transport
+  DEPENDS OpenCV PCL EIGEN3
 )
 
-# Include directories
+# 设置包含目录
 include_directories(
-    include
-    include/ImageProcess
-    ${OpenCV_INCLUDE_DIRS}
-    ${PCL_INCLUDE_DIRS}
-    ${EIGEN3_INCLUDE_DIR}
-    ${catkin_INCLUDE_DIRS}
-)
-SET(cv_bridge_LIBRARIES "/opt/ros/noetic/lib/libcv_bridge.so")
-# Link directories
-link_directories(${PCL_LIBRARY_DIRS})
-
-# Add definitions from PCL
-add_definitions(${PCL_DEFINITIONS})
-
-# Set source files
-set(SOURCES
-    src/calib.cpp
-    src/ImageProcess/imageprocess.cpp
-    # Add other source files here
+  include
+  ${catkin_INCLUDE_DIRS}
+  ${OpenCV_INCLUDE_DIRS}
+  ${PCL_INCLUDE_DIRS}
+  ${EIGEN3_INCLUDE_DIRS}
 )
 
-
-# Add another executable for calibration if needed
-
-add_library(common_lib
-    src/calib.cpp
-    src/config.cpp  # Added config.cpp
-    # ... other common source files
+# 从源文件创建库
+add_library(fast_lv_mapping
+  src/calib.cpp
+  src/config.cpp
+  src/ImageProcess/imageprocess.cpp
+  # 添加其他源文件（如需）
 )
 
-# If you have a preprocessing target, also add it there
-if(TARGET preprocessing)
-    target_sources(preprocessing PRIVATE src/config.cpp)
+# 将库与依赖项链接
+target_link_libraries(fast_lv_mapping
+  ${catkin_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+  ${PCL_LIBRARIES}
+)
+
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(fast_lv_mapping ${OpenMP_CXX_LIBRARIES})
 endif()
 
-add_executable(calibration src/run.cpp ${SOURCES})
-target_link_libraries(calibration
-    ${OpenCV_LIBS}
-    common_lib
-    ${PCL_LIBRARIES}
-    stdc++fs
+# 创建ROS节点可执行文件
+add_executable(fast_lv_mapping_node src/ros_node.cpp)
+target_link_libraries(fast_lv_mapping_node
+  fast_lv_mapping
+  ${catkin_LIBRARIES}
 )
 
-add_executable(preprocess src/preprocess.cpp ${SOURCES})
-target_link_libraries(preprocess
-    ${OpenCV_LIBS}
-    common_lib
-    ${PCL_LIBRARIES}
-    stdc++fs
+# 创建常规可执行文件（非ROS）
+add_executable(fast_lv_mapping_run src/run.cpp)
+target_link_libraries(fast_lv_mapping_run
+  fast_lv_mapping
+)
+
+# 创建预处理可执行文件（非ROS）
+add_executable(fast_lv_mapping_preprocess src/preprocess.cpp)
+target_link_libraries(fast_lv_mapping_preprocess
+  fast_lv_mapping
 )

@@ -47,8 +47,8 @@ void suggestVisualizationTools(const std::string& pcd_path) {
  */
 int main(int argc, char** argv)
 {
-    // Default configuration file path
-    std::string config_file = "/home/zzy/SensorCalibration/FastLVMapping/config/default_config.yaml";
+    // Default configuration file path - fixed to correct path
+    std::string config_file = "/home/zzy/SensorCalibration/EasyColor/src/FastLVMapping/config/default_config.yaml";
     
     // Command line argument can override config path
     if (argc > 1) {
@@ -100,6 +100,11 @@ int main(int argc, char** argv)
         std::cout << "\n===========================================";
         std::cout << "\nSuccessfully processed all images and created projections." << std::endl;
         std::cout << "Results saved to: " << output_path << std::endl;
+        std::cout << "Generated files include:" << std::endl;
+        std::cout << " - Colored point cloud: " << colored_pcd_path << std::endl;
+        std::cout << " - Camera trajectory visualization: " << output_path << "/trajectory/camera_trajectory_with_model.pcd" << std::endl;
+        std::cout << " - Optimized camera poses: " << output_path << "/trajectory/optimized_camera_poses.txt" << std::endl;
+        std::cout << " - Optimized extrinsics: " << output_path << "/calibration/optimized_extrinsics.txt" << std::endl;
         
         // Suggest visualization tools
         suggestVisualizationTools(colored_pcd_path);

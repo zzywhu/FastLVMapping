@@ -36,55 +36,56 @@ img_path: /media/zzy/T7/SLAM_DATASET/Rot_LVI-SLAM/LOOP/loop3/3/2
 traj_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/loop3/traj.txt
 output_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/loop3/result
 
-# Point cloud parameters
+# Point cloud parameters - 点云参数
 point_cloud_params:
-   min_depth: 0.1          # Minimum depth for visualization (meters)
-   max_depth: 50.0         # Maximum depth for visualization (meters)
-   neighborhood_size: 3    # Size of pixel neighborhood for depth checking
+   min_depth: 0.1          # 可视化的最小深度 (米)
+   max_depth: 50.0         # 可视化的最大深度 (米)
+   neighborhood_size: 2    # 深度检查的像素邻域大小
 
-# Projection parameters
+# Projection parameters - 投影参数
 projection_params:
-   image_width: 3000       # Width of undistorted image
-   image_height: 3000      # Height of undistorted image
-   focal_length: 1500      # Focal length for pinhole projection
-   image_center_x: 1500    # Image center X for pinhole projection
-   image_center_y: 1500    # Image center Y for pinhole projection
-   valid_image_start_x: 500  # Start X of valid region in the image
-   valid_image_start_y: 500  # Start Y of valid region in the image
-   valid_image_end_x: 2500   # End X of valid region in the image
-   valid_image_end_y: 2500   # End Y of valid region in the image
+   image_width: 800       # 去畸变图像宽度
+   image_height: 800      # 去畸变图像高度
+   focal_length: 400      # 针孔投影的焦距
+   image_center_x: 400    # 针孔投影的图像中心X坐标
+   image_center_y: 400    # 针孔投影的图像中心Y坐标
+   valid_image_start_x: 500  # 图像有效区域起始X坐标
+   valid_image_start_y: 500  # 图像有效区域起始Y坐标
+   valid_image_end_x: 2500   # 图像有效区域结束X坐标
+   valid_image_end_y: 2500   # 图像有效区域结束Y坐标
 
-# PnP parameters
+# PnP parameters - PnP参数
 pnp_params:
-   max_rotation_diff: 0.5     # Maximum allowed rotation difference
-   max_translation_diff: 0.5  # Maximum allowed translation difference
-   reprojection_error: 8.0    # Reprojection error threshold for RANSAC
-   min_inlier_count: 10       # Minimum number of inliers required
-   ransac_iterations: 100     # Number of RANSAC iterations
-   confidence: 0.99           # RANSAC confidence level
+   max_rotation_diff: 0.5     # 允许的最大旋转差异
+   max_translation_diff: 0.5  # 允许的最大平移差异
+   reprojection_error: 8.0    # RANSAC的重投影误差阈值
+   min_inlier_count: 10       # 所需的最小内点数
+   ransac_iterations: 100     # RANSAC迭代次数
+   confidence: 0.99           # RANSAC置信度
 
-# Output parameters
+# Output parameters - 输出参数
 output_params:
-   visualization_tool: ""   # Path to visualization tool executable
-   viz_frequency: 10        # How often to update visualization
+   visualization_tool: "pcl_viewer"  # 可视化工具可执行文件路径
+   viz_frequency: 10        # 更新可视化的频率
 
-# Processing parameters
+# Processing parameters - 处理参数
 processing_params:
-   img_sampling_step: 2    # Step size for image sampling (e.g., 2 means every other image)
-   preprocess_sampling_step: 2  # Step size for preprocessing (every other image)
+   img_sampling_step: 2    # 图像采样步长 (例如，2表示每隔一张图像)
+   image_downscale_factor: 1.0  # 图像缩放因子 (1.0表示不缩放，2.0表示缩小一半)
+   preprocess_sampling_step: 2  # 预处理的采样步长 (每隔一张图像)
 
-# Depth processing parameters
+# Depth processing parameters - 深度处理参数
 depth_params:
-   kernel_size: 3           # Kernel size for depth filtering
-   fill_holes: true         # Whether to fill holes in depth map
-   median_filter_size: 5    # Size of median filter for depth smoothing
-   gaussian_filter_size: 3  # Size of gaussian filter for depth smoothing
-   invert_depth: false      # Whether to invert depth values (far=bright, near=dark)
+   kernel_size: 3           # 深度过滤的核大小
+   fill_holes: true         # 是否填补深度图中的空洞
+   median_filter_size: 5    # 深度平滑的中值滤波器大小
+   gaussian_filter_size: 3  # 深度平滑的高斯滤波器大小
+   invert_depth: false      # 是否反转深度值 (远=亮，近=暗)
    
-# Match parameters for feature matching
+# Match parameters for feature matching - 特征匹配参数
 match_params:
-   matcher_type: "FLANN"     # Feature matcher type (FLANN or BF)
-   ratio_threshold: 0.75     # Ratio test threshold for FLANN matcher
-   max_distance: 30          # Maximum pixel distance for matches
-   min_matches: 20           # Minimum number of matches required
-   use_ransac: true          # Whether to use RANSAC for match filtering
+   matcher_type: "FLANN"    # 特征匹配器类型 (FLANN或BF)
+   ratio_threshold: 0.75    # FLANN匹配器的比率测试阈值
+   max_distance: 30         # 匹配的最大像素距离
+   min_matches: 20          # 所需的最小匹配数
+   use_ransac: true         # 是否使用RANSAC进行匹配过滤

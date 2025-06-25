@@ -1,0 +1,9 @@
+<launch>
+  <!-- Config file path - can be overridden from command line -->
+  <arg name="config_file" default="$(find fast_lv_mapping)/config/default_config.yaml" />
+  
+  <!-- Launch the preprocessing node with proper ROS initialization -->
+  <node pkg="fast_lv_mapping" type="fast_lv_mapping_preprocess" name="fast_lv_preprocess" output="screen">
+    <param name="config_file" value="$(arg config_file)" />
+  </node>
+</launch>

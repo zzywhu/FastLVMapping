@@ -9,6 +9,11 @@
 #include <iostream>
 #include <chrono>
 #include <iomanip>
+#include <filesystem>
+#include <pcl/kdtree/kdtree_flann.h>
+#include <nav_msgs/Path.h>
+#include <std_msgs/ColorRGBA.h>
+#include <pcl_conversions/pcl_conversions.h>  // Add this for toRosMsg
 
 namespace fs = std::filesystem;
 namespace lvmapping {
@@ -27,10 +32,59 @@ CalibProcessor::CalibProcessor() {
     dist_coeffs_ = config.cameraParams().distortion_coeffs.clone();
     T_lidar_camera_ = config.calibParams().T_lidar_camera;
     T_lidar_camera_update_ = T_lidar_camera_; // Initialize with the same value
+    
+    // Initialize the point cloud for frame-specific colored points
+    frame_colored_cloud.reset(new pcl::PointCloud<pcl::PointXYZRGB>());
+}
+
+// Add ROS constructor
+CalibProcessor::CalibProcessor(ros::NodeHandle* nh) : nh_(nh), ros_initialized_(false) {
+    // Default initialization using configuration
+    Config& config = Config::getInstance();
+    
+    camera_matrix_ = config.cameraParams().camera_matrix.clone();
+    newcamera_matrix_ = config.cameraParams().new_camera_matrix.clone();
+    resizecamera_matrix_ = config.cameraParams().resize_camera_matrix.clone();
+    dist_coeffs_ = config.cameraParams().distortion_coeffs.clone();
+    T_lidar_camera_ = config.calibParams().T_lidar_camera;
+    T_lidar_camera_update_ = T_lidar_camera_; // Initialize with the same value
+    
+    // Initialize the point cloud for frame-specific colored points
+    frame_colored_cloud.reset(new pcl::PointCloud<pcl::PointXYZRGB>());
+    
+    // Initialize ROS publishers if we have a valid node handle
+    if (nh_) {
+        initializeROS();
+    }
 }
 
 CalibProcessor::~CalibProcessor() {
     // Nothing specific to do in destructor
+}
+
+void CalibProcessor::initializeROS() {
+    if (!nh_ || ros_initialized_) {
+        return;
+    }
+    
+    // Set up ROS publishers
+    pointcloud_pub_ = nh_->advertise<sensor_msgs::PointCloud2>("colored_pointcloud", 1);
+    camera_pose_pub_ = nh_->advertise<visualization_msgs::MarkerArray>("camera_pose", 1);
+    camera_trajectory_pub_ = nh_->advertise<nav_msgs::Path>("camera_trajectory", 1);
+    
+    // Set up image transport publisher
+    image_transport::ImageTransport it(*nh_);
+    match_image_pub_ = it.advertise("match_visualization", 1);
+    
+    // Set default frame ID - Make sure this matches what's in your RViz config
+    frame_id_ = "map";  // This should match the Fixed Frame in RViz
+    
+    ros_initialized_ = true;
+    
+    // Initialize empty trajectory
+    camera_trajectory_.clear();
+    
+    ROS_INFO("ROS publishers initialized for visualization");
 }
 
 bool CalibProcessor::loadCalibrationParameters(const std::string& config_file) {
@@ -278,11 +332,69 @@ bool CalibProcessor::updateExtrinsics(const std::string& match_file,
         std::cout << "Updated extrinsics from PnP:" << std::endl;
         std::cout << T_lidar_camera_update_ << std::endl;
         
+        // Save the updated extrinsics immediately for this timestamp
+        saveExtrinsicsForTimestamp(current_timestamp_, output_folder_);
+        
+        // Check if there's a corresponding match visualization image and publish it
+        std::string match_viz_dir = output_folder_ + "/match/visualizations";
+        std::string match_viz_path = match_viz_dir + "/" + std::to_string(current_timestamp_) + "_matches.jpg";
+        if (ros_initialized_ && std::filesystem::exists(match_viz_path)) {
+            publishMatchImage(match_viz_path, current_timestamp_);
+        }
+        
         return true;
     } else {
         std::cerr << "PnP failed" << std::endl;
         return false;
     }
+}
+
+// Add a new function to save extrinsics for a specific timestamp
+bool CalibProcessor::saveExtrinsicsForTimestamp(double timestamp, const std::string& output_folder) {
+    // Create directory for calibration if it doesn't exist
+    std::string calib_dir = output_folder + "/calibration";
+    if (!fs::exists(calib_dir)) {
+        fs::create_directories(calib_dir);
+    }
+    
+    // Path to the extrinsics file
+    std::string extrinsics_file_path = calib_dir + "/optimized_extrinsics.txt";
+    
+    // Check if file exists to determine whether to write header
+    bool write_header = !fs::exists(extrinsics_file_path);
+    
+    // Open file in append mode if it exists, or create new file
+    std::ofstream extr_file;
+    if (write_header) {
+        extr_file.open(extrinsics_file_path);
+        // Write a header line
+        extr_file << "# timestamp tx ty tz qx qy qz qw" << std::endl;
+    } else {
+        extr_file.open(extrinsics_file_path, std::ios::app);
+    }
+    
+    if (!extr_file.is_open()) {
+        std::cerr << "Failed to open optimized extrinsics file: " << extrinsics_file_path << std::endl;
+        return false;
+    }
+    
+    // Extract translation from extrinsics
+    Eigen::Vector3d translation = T_lidar_camera_update_.block<3, 1>(0, 3);
+    
+    // Extract rotation as quaternion
+    Eigen::Matrix3d rot = T_lidar_camera_update_.block<3, 3>(0, 0);
+    Eigen::Quaterniond q(rot);
+    q.normalize();
+    
+    // Write timestamp, position, and quaternion to file
+    extr_file << std::fixed << std::setprecision(9) << timestamp << " "
+              << std::setprecision(6) << translation.x() << " " << translation.y() << " " << translation.z() << " "
+              << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << std::endl;
+    
+    extr_file.close();
+    std::cout << "Saved optimized extrinsics for timestamp " << timestamp << " to: " << extrinsics_file_path << std::endl;
+    
+    return true;
 }
 
 bool CalibProcessor::colorizePointCloud(const cv::Mat& undistorted_img,
@@ -291,7 +403,8 @@ bool CalibProcessor::colorizePointCloud(const cv::Mat& undistorted_img,
                                        pcl::PointCloud<pcl::PointXYZRGB>::Ptr& colored_cloud,
                                        std::vector<int>& point_color_count,
                                        const std::string& output_folder,
-                                       double timestamp) {
+                                       double timestamp,
+                                       std::vector<bool>& colored_in_this_frame) {
     // Get configuration parameters
     const Config& config = Config::getInstance();
     const auto& pc_params = config.pointCloudParams();
@@ -300,100 +413,146 @@ bool CalibProcessor::colorizePointCloud(const cv::Mat& undistorted_img,
     // Create depth visualization image
     cv::Mat depth_viz_img = undistorted_img.clone();
     
-    // Create depth buffer and point index buffer
+    // 创建视锥体过滤
+    Eigen::Matrix4d camera_to_world = camera_pose;
+    Eigen::Matrix4d world_to_camera = camera_pose.inverse();
+    
+    // 创建深度缓冲区和点索引缓冲区
     cv::Mat depth_buffer(depth_viz_img.size(), CV_32F, cv::Scalar(std::numeric_limits<float>::max()));
     cv::Mat point_index_buffer(depth_viz_img.size(), CV_32S, cv::Scalar(-1));
     
-    // First pass: Fill depth buffer
+    // 过滤相机视锥体外的点
+    pcl::PointCloud<pcl::PointXYZI>::Ptr filtered_cloud(new pcl::PointCloud<pcl::PointXYZI>);
+    std::vector<int> original_indices;
+    
+    // 视锥体过滤
+    #pragma omp parallel for schedule(dynamic, 1000) if(OPENMP_FOUND)
     for (size_t i = 0; i < cloud->points.size(); i++) {
         Eigen::Vector4d pt_world(cloud->points[i].x, cloud->points[i].y, cloud->points[i].z, 1.0);
-        Eigen::Vector4d pt_camera = camera_pose.inverse() * pt_world;
+        Eigen::Vector4d pt_camera = world_to_camera * pt_world;
         
-        // Skip points behind camera or too far
+        // 基本剔除: 点在相机后面或太远
         if (pt_camera[2] <= 0 || pt_camera[2] >= pc_params.max_depth) continue;
         
-        // Project to image plane
+        // 投影到图像平面
         int px = static_cast<int>(proj_params.focal_length * pt_camera[0] / pt_camera[2] + proj_params.image_center_x);
         int py = static_cast<int>(proj_params.focal_length * pt_camera[1] / pt_camera[2] + proj_params.image_center_y);
         
-        // Check if within valid image bounds
+        // 检查是否在有效图像边界内
         if (px >= proj_params.valid_image_start_x && px < proj_params.valid_image_end_x && 
             py >= proj_params.valid_image_start_y && py < proj_params.valid_image_end_y) {
             
-            float depth = static_cast<float>(pt_camera[2]);
-            
-            // Update neighborhood pixels
-            for (int ny = std::max(proj_params.valid_image_start_y, py - pc_params.neighborhood_size); 
-                 ny <= std::min(proj_params.valid_image_end_y - 1, py + pc_params.neighborhood_size); ny++) {
-                for (int nx = std::max(proj_params.valid_image_start_x, px - pc_params.neighborhood_size); 
-                     nx <= std::min(proj_params.valid_image_end_x - 1, px + pc_params.neighborhood_size); nx++) {
-                    
-                    // If current point is closer than what's in the buffer
-                    if (depth < depth_buffer.at<float>(ny, nx)) {
-                        depth_buffer.at<float>(ny, nx) = depth;
-                        point_index_buffer.at<int>(ny, nx) = static_cast<int>(i);
-                    }
+            #pragma omp critical
+            {
+                filtered_cloud->push_back(cloud->points[i]);
+                original_indices.push_back(i);
+            }
+        }
+    }
+    
+    // 只处理视锥体内的点
+    for (size_t filtered_idx = 0; filtered_idx < filtered_cloud->points.size(); filtered_idx++) {
+        const auto& point = filtered_cloud->points[filtered_idx];
+        int original_idx = original_indices[filtered_idx];
+        
+        Eigen::Vector4d pt_world(point.x, point.y, point.z, 1.0);
+        Eigen::Vector4d pt_camera = world_to_camera * pt_world;
+        
+        float depth = static_cast<float>(pt_camera[2]);
+        
+        // 投影到图像平面
+        int px = static_cast<int>(proj_params.focal_length * pt_camera[0] / pt_camera[2] + proj_params.image_center_x);
+        int py = static_cast<int>(proj_params.focal_length * pt_camera[1] / pt_camera[2] + proj_params.image_center_y);
+        
+        // 更新邻域像素
+        for (int ny = std::max(proj_params.valid_image_start_y, py - pc_params.neighborhood_size); 
+             ny <= std::min(proj_params.valid_image_end_y - 1, py + pc_params.neighborhood_size); ny++) {
+            for (int nx = std::max(proj_params.valid_image_start_x, px - pc_params.neighborhood_size); 
+                 nx <= std::min(proj_params.valid_image_end_x - 1, px + pc_params.neighborhood_size); nx++) {
+                
+                // 如果当前点比缓冲区中的点更近
+                if (depth < depth_buffer.at<float>(ny, nx)) {
+                    depth_buffer.at<float>(ny, nx) = depth;
+                    point_index_buffer.at<int>(ny, nx) = original_idx;
                 }
             }
         }
     }
     
-    // Second pass: Colorize points and create visualization
+    // 第二阶段：给点云着色并创建可视化
+    int colored_count = 0;
+    #pragma omp parallel for reduction(+:colored_count) collapse(2) if(OPENMP_FOUND)
     for (int y = proj_params.valid_image_start_y; y < proj_params.valid_image_end_y; y++) {
         for (int x = proj_params.valid_image_start_x; x < proj_params.valid_image_end_x; x++) {
             int point_idx = point_index_buffer.at<int>(y, x);
             if (point_idx >= 0) {
-                // Get depth value
+                // 获取深度值
                 float depth = depth_buffer.at<float>(y, x);
                 
-                // Create depth visualization
+                // 创建深度可视化
                 float normalized_depth = (depth - pc_params.min_depth) / (pc_params.max_depth - pc_params.min_depth);
                 normalized_depth = std::min(std::max(normalized_depth, 0.0f), 1.0f);
                 
                 int r = static_cast<int>((1.0f - normalized_depth) * 255);
-                int g = static_cast<int>((normalized_depth > 0.5f ? 
-                                        1.0f - normalized_depth : normalized_depth) * 255);
+                int g = static_cast<int>((normalized_depth > 0.5f ? 1.0f - normalized_depth : normalized_depth) * 255);
                 int b = static_cast<int>(normalized_depth * 255);
                 
-                depth_viz_img.at<cv::Vec3b>(y, x) = cv::Vec3b(b, g, r);
+                #pragma omp critical
+                {
+                    depth_viz_img.at<cv::Vec3b>(y, x) = cv::Vec3b(b, g, r);
+                }
                 
-                // Colorize point cloud
+                // 给点云上色
                 cv::Vec3b color = undistorted_img.at<cv::Vec3b>(y, x);
-                colored_cloud->points[point_idx].b = color[0];
-                colored_cloud->points[point_idx].g = color[1];
-                colored_cloud->points[point_idx].r = color[2];
-                point_color_count[point_idx]++;
+                
+                #pragma omp critical
+                {
+                    colored_cloud->points[point_idx].b = color[0];
+                    colored_cloud->points[point_idx].g = color[1];
+                    colored_cloud->points[point_idx].r = color[2];
+                    
+                    // 标记这个点在此帧中被着色
+                    colored_in_this_frame[point_idx] = true;
+                    
+                    // 递增此点的颜色计数
+                    point_color_count[point_idx]++;
+                }
+                
+                colored_count++;
             }
         }
     }
     
-    // Save depth visualization image
-    std::string depth_viz_dir = output_folder + "/depth_viz";
-    if (!fs::exists(depth_viz_dir)) {
-        fs::create_directories(depth_viz_dir);
+    // 仅当有点被着色时才保存深度可视化图像 - 减少I/O操作
+    if (colored_count > 0) {
+        std::string depth_viz_dir = output_folder + "/depth_viz";
+        if (!fs::exists(depth_viz_dir)) {
+            fs::create_directories(depth_viz_dir);
+        }
+        
+        std::string depth_viz_path = depth_viz_dir + "/" + std::to_string(timestamp) + "_depth.png";
+        cv::imwrite(depth_viz_path, depth_viz_img);
     }
     
-    std::string depth_viz_path = depth_viz_dir + "/" + std::to_string(timestamp) + "_depth.png";
-    cv::imwrite(depth_viz_path, depth_viz_img);
-    
-    return true;
+    return colored_count > 0;
 }
 
 bool CalibProcessor::saveVisualization(const pcl::PointCloud<pcl::PointXYZRGB>::Ptr& colored_cloud,
                                       const std::vector<int>& point_color_count,
                                       const std::string& output_folder,
                                       const std::string& progress_info) {
-    // Create directory for colormap if it doesn't exist
+    // 创建colormap目录（如果不存在）
     std::string colormap_dir = output_folder + "/colormap";
     if (!fs::exists(colormap_dir)) {
         fs::create_directories(colormap_dir);
     }
     
-    // Display progress info
+    // 显示进度信息
     std::cout << progress_info << std::endl;
     
-    // Display point coloring statistics
+    // 统计着色点数
     int colored_points = 0;
+    #pragma omp parallel for reduction(+:colored_points) if(OPENMP_FOUND)
     for (size_t i = 0; i < point_color_count.size(); ++i) {
         if (point_color_count[i] > 0) {
             colored_points++;
@@ -404,40 +563,51 @@ bool CalibProcessor::saveVisualization(const pcl::PointCloud<pcl::PointXYZRGB>::
     std::cout << "Points colored so far: " << colored_points << "/" << colored_cloud->points.size()
               << " (" << percentage << "%)" << std::endl;
     
-    // Optionally, launch PCL viewer
-    static bool viewer_launched = false;
-    if (!viewer_launched) {
+    // 如果是第一次保存，提供PCL查看器信息
+    static bool viewer_info_shown = false;
+    if (!viewer_info_shown) {
         if (!visualization_tool_.empty()) {
             std::cout << "To watch the coloring process in real-time, you can run:" << std::endl;
             std::cout << visualization_tool_ << " " << colormap_dir << "/colored_pointcloud_live.pcd" << std::endl;
         } else {
             std::cout << "No point cloud viewer available. Install pcl-tools, CloudCompare, or MeshLab for visualization." << std::endl;
         }
-        viewer_launched = true;
+        viewer_info_shown = true;
     }
     
-    // Create a visualization cloud
-    pcl::PointCloud<pcl::PointXYZRGB>::Ptr viz_cloud(new pcl::PointCloud<pcl::PointXYZRGB>(*colored_cloud));
-    for (size_t i = 0; i < viz_cloud->points.size(); ++i) {
-        if (point_color_count[i] > 0) {
-            viz_cloud->points[i].r = point_color_count[i];
-            viz_cloud->points[i].g = point_color_count[i];
-            viz_cloud->points[i].b = point_color_count[i];
+    // 创建可视化点云 - 只保存当前进度状态，减少保存完整点云的次数
+    static int last_save_colored_count = 0;
+    
+    // 如果着色点数明显增加(至少增加1%或总数的1000个点)，才保存新的点云
+    if (colored_points > last_save_colored_count + std::max(static_cast<int>(colored_cloud->points.size() * 0.01), 1000) ||
+        percentage >= 99.9) { // 或者接近完成时保存
+        
+        std::cout << "Saving visualization point cloud..." << std::endl;
+        
+        // 创建一个可视化点云
+        pcl::PointCloud<pcl::PointXYZRGB>::Ptr viz_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
+        
+        // 避免制作完整副本，只添加已着色的点
+        for (size_t i = 0; i < colored_cloud->points.size(); ++i) {
+            if (point_color_count[i] > 0) {
+                pcl::PointXYZRGB colored_point = colored_cloud->points[i];
+                viz_cloud->push_back(colored_point);
+            }
+        }
+        
+        // 保存活动可视化文件
+        pcl::io::savePCDFileBinary(colormap_dir + "/colored_pointcloud_live.pcd", *viz_cloud);
+        
+        // 更新上次保存的着色点数
+        last_save_colored_count = colored_points;
+        
+        // 如果完成度超过99.9%，保存最终结果
+        if (percentage >= 99.9) {
+            std::string final_cloud_path = colormap_dir + "/colored_pointcloud_final.pcd";
+            pcl::io::savePCDFileBinary(final_cloud_path, *viz_cloud);
+            std::cout << "Final colored point cloud saved to: " << final_cloud_path << std::endl;
         }
     }
-    
-    // Save the visualization file
-    pcl::io::savePCDFileBinary(colormap_dir + "/colored_pointcloud_live.pcd", *viz_cloud);
-    
-    // Create and save a cloud with only colored points
-    pcl::PointCloud<pcl::PointXYZRGB>::Ptr colored_only_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
-    for (size_t i = 0; i < colored_cloud->points.size(); ++i) {
-        if (point_color_count[i] > 0) {
-            colored_only_cloud->push_back(colored_cloud->points[i]);
-        }
-    }
-    
-    pcl::io::savePCDFileBinary(colormap_dir + "/colored_only_points_live.pcd", *colored_only_cloud);
     
     return true;
 }
@@ -448,31 +618,74 @@ bool CalibProcessor::processImageFrame(double timestamp,
                                       const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud,
                                       pcl::PointCloud<pcl::PointXYZRGB>::Ptr& colored_cloud,
                                       std::vector<int>& point_color_count,
-                                      const std::string& output_folder) {
-    // Load image
-    cv::Mat img = cv::imread(img_path);
+                                      const std::string& output_folder,
+                                      std::vector<bool>& colored_in_this_frame) {
+    // 获取图像缩放因子
+    const Config& config = Config::getInstance();
+    double image_downscale_factor = config.processingParams().image_downscale_factor;
+    
+    // 加载图像
+    cv::Mat img = cv::imread(img_path, cv::IMREAD_COLOR);
     if (img.empty()) {
         std::cerr << "Failed to open image: " << img_path << std::endl;
         return false;
     }
     
-    // Get the camera model from configuration
-    const std::string& camera_model = Config::getInstance().cameraParams().camera_model;
-    
-    // Undistort the image based on camera model
-    cv::Mat undistorted_img;
-    if (camera_model == "fisheye") {
-        cv::fisheye::undistortImage(img, undistorted_img, camera_matrix_, dist_coeffs_, newcamera_matrix_);
-    } else { // pinhole or default
-        cv::undistort(img, undistorted_img, camera_matrix_, dist_coeffs_, newcamera_matrix_);
+    // 如果需要，缩放图像以加快处理速度
+    if (image_downscale_factor > 1.0) {
+        cv::Size new_size(static_cast<int>(img.cols / image_downscale_factor), 
+                          static_cast<int>(img.rows / image_downscale_factor));
+        cv::resize(img, img, new_size, 0, 0, cv::INTER_AREA);
+        
+        // 缩放相机矩阵以匹配缩小的图像
+        cv::Mat scaled_camera_matrix = camera_matrix_.clone();
+        scaled_camera_matrix.at<double>(0, 0) /= image_downscale_factor;
+        scaled_camera_matrix.at<double>(1, 1) /= image_downscale_factor;
+        scaled_camera_matrix.at<double>(0, 2) /= image_downscale_factor;
+        scaled_camera_matrix.at<double>(1, 2) /= image_downscale_factor;
+        
+        cv::Mat scaled_newcamera_matrix = newcamera_matrix_.clone();
+        scaled_newcamera_matrix.at<double>(0, 0) /= image_downscale_factor;
+        scaled_newcamera_matrix.at<double>(1, 1) /= image_downscale_factor;
+        scaled_newcamera_matrix.at<double>(0, 2) /= image_downscale_factor;
+        scaled_newcamera_matrix.at<double>(1, 2) /= image_downscale_factor;
+        
+        // 获取相机模型
+        const std::string& camera_model = config.cameraParams().camera_model;
+        
+        // 基于相机模型去除畸变
+        cv::Mat undistorted_img;
+        if (camera_model == "fisheye") {
+            cv::fisheye::undistortImage(img, undistorted_img, scaled_camera_matrix, dist_coeffs_, scaled_newcamera_matrix);
+        } else { // pinhole or default
+            cv::undistort(img, undistorted_img, scaled_camera_matrix, dist_coeffs_, scaled_newcamera_matrix);
+        }
+        
+        // 计算相机位姿
+        Eigen::Matrix4d camera_pose = lidar_pose * T_lidar_camera_update_.inverse();
+        
+        // 用深度感知方法给点云着色并跟踪哪些点被着色了
+        return colorizePointCloud(undistorted_img, camera_pose, cloud, colored_cloud, 
+                                point_color_count, output_folder, timestamp, colored_in_this_frame);
+    } else {
+        // 获取相机模型
+        const std::string& camera_model = config.cameraParams().camera_model;
+        
+        // 基于相机模型去除畸变
+        cv::Mat undistorted_img;
+        if (camera_model == "fisheye") {
+            cv::fisheye::undistortImage(img, undistorted_img, camera_matrix_, dist_coeffs_, newcamera_matrix_);
+        } else { // pinhole or default
+            cv::undistort(img, undistorted_img, camera_matrix_, dist_coeffs_, newcamera_matrix_);
+        }
+        
+        // 计算相机位姿
+        Eigen::Matrix4d camera_pose = lidar_pose * T_lidar_camera_update_.inverse();
+        
+        // 用深度感知方法给点云着色并跟踪哪些点被着色了
+        return colorizePointCloud(undistorted_img, camera_pose, cloud, colored_cloud, 
+                                point_color_count, output_folder, timestamp, colored_in_this_frame);
     }
-    
-    // Calculate camera pose
-    Eigen::Matrix4d camera_pose = lidar_pose * T_lidar_camera_update_.inverse();
-    
-    // Colorize point cloud with depth-aware method
-    return colorizePointCloud(undistorted_img, camera_pose, cloud, colored_cloud, 
-                             point_color_count, output_folder, timestamp);
 }
 
 bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder, 
@@ -485,8 +698,21 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
     const int img_sampling_step = config.processingParams().img_sampling_step;
     
     // Create output directory if it doesn't exist
-    if (!fs::exists(output_folder)) {
-        fs::create_directories(output_folder);
+    if (output_folder.empty()) {
+        std::cerr << "Error: Output folder path is empty" << std::endl;
+        return false;
+    }
+    
+    try {
+        if (!fs::exists(output_folder)) {
+            if (!fs::create_directories(output_folder)) {
+                std::cerr << "Failed to create output directory: " << output_folder << std::endl;
+                return false;
+            }
+        }
+    } catch (const fs::filesystem_error& e) {
+        std::cerr << "Filesystem error: " << e.what() << std::endl;
+        return false;
     }
     
     // Load trajectory data
@@ -516,20 +742,27 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
     // Sort trajectory by timestamp
     std::sort(trajectory.begin(), trajectory.end(), compareTimestamps);
     
-    // Load point cloud
+    // 优化读取点云过程 - 使用带进度显示的点云加载
+    std::cout << "Loading point cloud from: " << pcd_file << " (this may take a while)..." << std::endl;
+    auto cloud_load_start = std::chrono::high_resolution_clock::now();
     pcl::PointCloud<pcl::PointXYZI>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZI>);
     if (pcl::io::loadPCDFile<pcl::PointXYZI>(pcd_file, *cloud) == -1) {
         std::cerr << "Failed to load point cloud: " << pcd_file << std::endl;
         return false;
     }
+    auto cloud_load_end = std::chrono::high_resolution_clock::now();
+    auto cloud_load_time = std::chrono::duration_cast<std::chrono::seconds>(cloud_load_end - cloud_load_start).count();
+    std::cout << "Point cloud loaded with " << cloud->size() << " points in " << cloud_load_time << " seconds." << std::endl;
     
-    // Create the colored point cloud
+    // 创建着色点云
+    std::cout << "Initializing colored point cloud..." << std::endl;
     pcl::PointCloud<pcl::PointXYZRGB>::Ptr colored_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
     colored_cloud->points.resize(cloud->points.size());
     colored_cloud->width = cloud->width;
     colored_cloud->height = cloud->height;
     
-    // Initialize the colored cloud with coordinates
+    // 并行初始化着色点云
+    #pragma omp parallel for schedule(dynamic, 10000) if(OPENMP_FOUND)
     for (size_t i = 0; i < cloud->points.size(); ++i) {
         colored_cloud->points[i].x = cloud->points[i].x;
         colored_cloud->points[i].y = cloud->points[i].y;
@@ -539,7 +772,7 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
         colored_cloud->points[i].b = 0;
     }
     
-    // Create a counter for each point
+    // 为每个点创建计数器
     std::vector<int> point_color_count(cloud->points.size(), 0);
     
     // Get all image files from directory
@@ -605,9 +838,24 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
     
     // Process each selected image
     int img_count = 0;
+    ros::Rate publish_rate(30); // Increase rate to 30Hz for smoother visualization
+    
+    // Clear trajectory for new processing run
+    if (ros_initialized_) {
+        camera_trajectory_.clear();
+    }
+    
+    // 添加进度显示和预计时间
+    auto start_time = std::chrono::high_resolution_clock::now();
+    std::cout << "Starting image processing..." << std::endl;
+    
     for (const auto& img_data : selected_images) {
         double timestamp = img_data.first;
         std::string img_path = img_data.second;
+        
+        // Store current timestamp and output folder for use in updateExtrinsics
+        current_timestamp_ = timestamp;
+        output_folder_ = output_folder;
         
         // Interpolate LiDAR pose at this timestamp
         Eigen::Matrix4d lidar_pose;
@@ -619,35 +867,106 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
         if (match_files.find(timestamp) != match_files.end() && 
             index_files.find(timestamp) != index_files.end()) {
             
-            if (!updateExtrinsics(match_files[timestamp], index_files[timestamp], lidar_pose, cloud)) {
-                // After updating extrinsics, save the new calibration
-                //saveCalibrationParameters(config_file);
+            if (updateExtrinsics(match_files[timestamp], index_files[timestamp], lidar_pose, cloud)) {
+                // Extrinsics are now saved immediately after successful update
+                // No need to do anything here
+            } else {
                 continue;
             }
         }
         
-        // Process image frame for colorization
-        if (!processImageFrame(timestamp, img_path, lidar_pose, cloud, colored_cloud, point_color_count, output_folder)) {
+        // 初始化此帧标记
+        std::vector<bool> colored_in_this_frame(cloud->points.size(), false);
+        
+        // Process image frame for colorization with tracking of colored points
+        if (!processImageFrame(timestamp, img_path, lidar_pose, cloud, colored_cloud, point_color_count, output_folder, colored_in_this_frame)) {
             std::cerr << "Failed to process image frame: " << img_path << std::endl;
             continue;
         }
         
-        // Show progress and save visualization periodically
-        if (img_count % viz_frequency == 0) {
+        // Calculate camera pose for visualization
+        Eigen::Matrix4d camera_pose = lidar_pose * T_lidar_camera_update_.inverse();
+        
+        // Publish to ROS topics if ROS is initialized
+        if (ros_initialized_) {
+            // Use current ROS time instead of image timestamp for better visualization
+            ros::Time current_ros_time = ros::Time::now();
+            
+            publishCameraPose(camera_pose, current_ros_time.toSec());
+            
+            // 创建仅包含此帧着色点的点云
+            frame_colored_cloud->clear(); // 确保先清空
+            
+            for (size_t i = 0; i < colored_cloud->points.size(); ++i) {
+                if (colored_in_this_frame[i]) {
+                    frame_colored_cloud->push_back(colored_cloud->points[i]);
+                }
+            }
+            
+            // 仅发布此帧着色的点
+            if (!frame_colored_cloud->empty()) {
+                publishColoredPointCloud(frame_colored_cloud, current_ros_time.toSec());
+            }
+            
+            // 给ROS一些时间处理
+            publish_rate.sleep();
+            ros::spinOnce();
+        }
+        
+        // 显示更精细的进度信息
+        if (img_count % 10 == 0 || img_count == selected_images.size() - 1) {
+            auto current_time = std::chrono::high_resolution_clock::now();
+            auto elapsed_seconds = std::chrono::duration_cast<std::chrono::seconds>(current_time - start_time).count();
+            
+            float progress = static_cast<float>(img_count + 1) / selected_images.size();
+            int elapsed_minutes = static_cast<int>(elapsed_seconds) / 60;
+            int elapsed_secs = static_cast<int>(elapsed_seconds) % 60;
+            
+            // 计算预计剩余时间
+            int eta = 0;
+            if (progress > 0.01) { // 避免刚开始时的不准确预测
+                eta = static_cast<int>(elapsed_seconds * (1.0 / progress - 1.0));
+            }
+            int eta_minutes = eta / 60;
+            int eta_secs = eta % 60;
+            
+            std::cout << "\rProcessing: " << img_count + 1 << "/" << selected_images.size()
+                      << " [" << std::string(static_cast<int>(progress * 50), '=') << std::string(50 - static_cast<int>(progress * 50), ' ') << "] "
+                      << static_cast<int>(progress * 100) << "% "
+                      << "Elapsed: " << elapsed_minutes << "m " << elapsed_secs << "s "
+                      << "ETA: " << eta_minutes << "m " << eta_secs << "s        " << std::flush;
+        }
+        
+        // 仅在指定频率保存可视化，减少I/O操作
+        if (img_count % viz_frequency == 0 || img_count == selected_images.size() - 1) {
             std::string progress_info = "Processed " + std::to_string(img_count + 1) + "/" + 
-                                      std::to_string(selected_images.size()) + " images. Progress: " + 
-                                      std::to_string(100.0 * (img_count + 1) / selected_images.size()) + "%";
+                                      std::to_string(selected_images.size()) + " images";
             saveVisualization(colored_cloud, point_color_count, output_folder, progress_info);
         }
         
         img_count++;
     }
     
+    std::cout << std::endl; // 结束进度条显示
+    
+    // 记录总处理时间
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto total_seconds = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time).count();
+    int total_minutes = static_cast<int>(total_seconds) / 60;
+    int remaining_seconds = static_cast<int>(total_seconds) % 60;
+    
+    std::cout << "Processing completed in " << total_minutes << " minutes and " << remaining_seconds << " seconds." << std::endl;
+    
     // Final save and report
     std::string progress_info = "Processing complete. Processed " + std::to_string(img_count) + 
                               " images out of " + std::to_string(selected_images.size());
     saveVisualization(colored_cloud, point_color_count, output_folder, progress_info);
     
+    // Generate and save additional outputs
+    saveOptimizedCameraPoses(trajectory, output_folder);
+    // No need to call saveOptimizedExtrinsics here as they have been saved incrementally
+    // saveOptimizedExtrinsics(trajectory, output_folder);
+    createCameraTrajectoryVisualization(trajectory, output_folder);
     
     return true;
 }
@@ -656,8 +975,21 @@ bool CalibProcessor::preprocess(const std::string& image_folder,
                                 const std::string& pcd_file,
                                 const std::string& output_folder) {
     // Create output directory if not exists
-    if (!fs::exists(output_folder)) {
-        fs::create_directories(output_folder);
+    if (output_folder.empty()) {
+        std::cerr << "Error: Output folder path is empty" << std::endl;
+        return false;
+    }
+    
+    try {
+        if (!fs::exists(output_folder)) {
+            if (!fs::create_directories(output_folder)) {
+                std::cerr << "Failed to create output directory: " << output_folder << std::endl;
+                return false;
+            }
+        }
+    } catch (const fs::filesystem_error& e) {
+        std::cerr << "Filesystem error: " << e.what() << std::endl;
+        return false;
     }
     
     // Load trajectory data
@@ -693,6 +1025,7 @@ bool CalibProcessor::preprocess(const std::string& image_folder,
         std::cerr << "Failed to load point cloud: " << pcd_file << std::endl;
         return false;
     }
+    
     // Create a counter for each point to average colors from multiple images
     
     // Get all image files from directory
@@ -986,6 +1319,28 @@ bool CalibProcessor::initialize(const std::string& config_file) {
 
 bool CalibProcessor::run() {
     std::cout << "Starting processing with parameters:" << std::endl;
+    
+    // Validate input paths
+    if (image_folder_.empty()) {
+        std::cerr << "Error: Image folder path is empty" << std::endl;
+        return false;
+    }
+    
+    if (trajectory_file_.empty()) {
+        std::cerr << "Error: Trajectory file path is empty" << std::endl;
+        return false;
+    }
+    
+    if (pcd_file_.empty()) {
+        std::cerr << "Error: Point cloud file path is empty" << std::endl;
+        return false;
+    }
+    
+    if (output_folder_.empty()) {
+        std::cerr << "Error: Output folder path is empty" << std::endl;
+        return false;
+    }
+    
     std::cout << "Image folder: " << image_folder_ << std::endl;
     std::cout << "Trajectory file: " << trajectory_file_ << std::endl;
     std::cout << "Point cloud file: " << pcd_file_ << std::endl;
@@ -997,6 +1352,28 @@ bool CalibProcessor::run() {
 
 bool CalibProcessor::runPreprocessing() {
     std::cout << "Starting preprocessing with parameters:" << std::endl;
+    
+    // Validate input paths
+    if (image_folder_.empty()) {
+        std::cerr << "Error: Image folder path is empty" << std::endl;
+        return false;
+    }
+    
+    if (trajectory_file_.empty()) {
+        std::cerr << "Error: Trajectory file path is empty" << std::endl;
+        return false;
+    }
+    
+    if (pcd_file_.empty()) {
+        std::cerr << "Error: Point cloud file path is empty" << std::endl;
+        return false;
+    }
+    
+    if (output_folder_.empty()) {
+        std::cerr << "Error: Output folder path is empty" << std::endl;
+        return false;
+    }
+    
     std::cout << "Image folder: " << image_folder_ << std::endl;
     std::cout << "Trajectory file: " << trajectory_file_ << std::endl;
     std::cout << "Point cloud file: " << pcd_file_ << std::endl;
@@ -1006,4 +1383,480 @@ bool CalibProcessor::runPreprocessing() {
     return preprocess(image_folder_, trajectory_file_, pcd_file_, output_folder_);
 }
 
-} // namespace lvmapping
+bool CalibProcessor::saveOptimizedCameraPoses(const std::vector<std::pair<double, Eigen::Matrix4d>>& trajectory,
+                                            const std::string& output_folder) {
+    // Create directory for trajectory if it doesn't exist
+    std::string traj_dir = output_folder + "/trajectory";
+    if (!fs::exists(traj_dir)) {
+        fs::create_directories(traj_dir);
+    }
+    
+    // Save camera poses to file
+    std::string pose_file_path = traj_dir + "/optimized_camera_poses.txt";
+    std::ofstream pose_file(pose_file_path);
+    if (!pose_file.is_open()) {
+        std::cerr << "Failed to create optimized camera pose file: " << pose_file_path << std::endl;
+        return false;
+    }
+    
+    for (const auto& pose_data : trajectory) {
+        double timestamp = pose_data.first;
+        // Calculate camera pose from LiDAR pose
+        Eigen::Matrix4d camera_pose = pose_data.second * T_lidar_camera_update_.inverse();
+        
+        // Extract position
+        Eigen::Vector3d position = camera_pose.block<3, 1>(0, 3);
+        
+        // Extract rotation as quaternion
+        Eigen::Matrix3d rot = camera_pose.block<3, 3>(0, 0);
+        Eigen::Quaterniond q(rot);
+        q.normalize();
+        
+        // Write timestamp, position, and quaternion to file
+        pose_file << std::fixed << std::setprecision(9) << timestamp << " "
+                  << std::setprecision(6) << position.x() << " " << position.y() << " " << position.z() << " "
+                  << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << std::endl;
+    }
+    
+    pose_file.close();
+    std::cout << "Saved optimized camera poses to: " << pose_file_path << std::endl;
+    return true;
+}
+
+bool CalibProcessor::saveOptimizedExtrinsics(const std::vector<std::pair<double, Eigen::Matrix4d>>& trajectory,
+                                           const std::string& output_folder) {
+    // Create directory for calibration if it doesn't exist
+    std::string calib_dir = output_folder + "/calibration";
+    if (!fs::exists(calib_dir)) {
+        fs::create_directories(calib_dir);
+    }
+    
+    // Save extrinsics to file
+    std::string extrinsics_file_path = calib_dir + "/optimized_extrinsics.txt";
+    std::ofstream extr_file(extrinsics_file_path);
+    if (!extr_file.is_open()) {
+        std::cerr << "Failed to create optimized extrinsics file: " << extrinsics_file_path << std::endl;
+        return false;
+    }
+    
+    // For each timestamp, save the optimized extrinsics
+    // We're using the same T_lidar_camera_update_ for all frames in this implementation
+    for (const auto& pose_data : trajectory) {
+        double timestamp = pose_data.first;
+        
+        // Extract translation from extrinsics
+        Eigen::Vector3d translation = T_lidar_camera_update_.block<3, 1>(0, 3);
+        
+        // Extract rotation as quaternion
+        Eigen::Matrix3d rot = T_lidar_camera_update_.block<3, 3>(0, 0);
+        Eigen::Quaterniond q(rot);
+        q.normalize();
+        
+        // Write timestamp, position, and quaternion to file
+        extr_file << std::fixed << std::setprecision(9) << timestamp << " "
+                  << std::setprecision(6) << translation.x() << " " << translation.y() << " " << translation.z() << " "
+                  << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << std::endl;
+    }
+    
+    extr_file.close();
+    std::cout << "Saved optimized extrinsics to: " << extrinsics_file_path << std::endl;
+    return true;
+}
+
+bool CalibProcessor::createCameraTrajectoryVisualization(const std::vector<std::pair<double, Eigen::Matrix4d>>& trajectory,
+                                                      const std::string& output_folder) {
+    // Create directory for trajectory if it doesn't exist
+    std::string traj_dir = output_folder + "/trajectory";
+    if (!fs::exists(traj_dir)) {
+        fs::create_directories(traj_dir);
+    }
+    
+    // Create a new point cloud with camera models at each pose
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr traj_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
+    
+    // Define camera model vertices (simplified camera frustum)
+    // Origin at camera center
+    Eigen::Vector3d cam_center(0, 0, 0);
+    // Camera frustum corners (representing field of view)
+    double size = 0.1; // Size of the camera model
+    Eigen::Vector3d top_left(-size, size, size*2);
+    Eigen::Vector3d top_right(size, size, size*2);
+    Eigen::Vector3d bottom_left(-size, -size, size*2);
+    Eigen::Vector3d bottom_right(size, -size, size*2);
+    
+    // Define colors (RGB)
+    uint8_t traj_r = 255, traj_g = 0, traj_b = 0;        // Red for trajectory points
+    uint8_t cam_r = 0, cam_g = 255, cam_b = 0;           // Green for camera model
+    
+    // Process each trajectory point
+    for (const auto& pose_data : trajectory) {
+        // Calculate camera pose from LiDAR pose
+        Eigen::Matrix4d camera_pose = pose_data.second * T_lidar_camera_update_.inverse();
+        
+        // Extract position
+        Eigen::Vector3d position = camera_pose.block<3, 1>(0, 3);
+        
+        // Extract rotation
+        Eigen::Matrix3d rotation = camera_pose.block<3, 3>(0, 0);
+        
+        // Add trajectory point (camera center) in red
+        pcl::PointXYZRGB traj_pt;
+        traj_pt.x = position.x();
+        traj_pt.y = position.y();
+        traj_pt.z = position.z();
+        traj_pt.r = traj_r;
+        traj_pt.g = traj_g;
+        traj_pt.b = traj_b;
+        traj_cloud->points.push_back(traj_pt);
+        
+        // Transform camera model vertices to world coordinates
+        Eigen::Vector3d world_center = position;
+        Eigen::Vector3d world_top_left = position + rotation * top_left;
+        Eigen::Vector3d world_top_right = position + rotation * top_right;
+        Eigen::Vector3d world_bottom_left = position + rotation * bottom_left;
+        Eigen::Vector3d world_bottom_right = position + rotation * bottom_right;
+        
+        // Add camera center
+        pcl::PointXYZRGB cam_pt_center;
+        cam_pt_center.x = world_center.x();
+        cam_pt_center.y = world_center.y();
+        cam_pt_center.z = world_center.z();
+        cam_pt_center.r = cam_r;
+        cam_pt_center.g = cam_g;
+        cam_pt_center.b = cam_b;
+        traj_cloud->points.push_back(cam_pt_center);
+        
+        // Add camera frustum corners
+        pcl::PointXYZRGB cam_pt_tl, cam_pt_tr, cam_pt_bl, cam_pt_br;
+        
+        cam_pt_tl.x = world_top_left.x();
+        cam_pt_tl.y = world_top_left.y();
+        cam_pt_tl.z = world_top_left.z();
+        cam_pt_tl.r = cam_r;
+        cam_pt_tl.g = cam_g;
+        cam_pt_tl.b = cam_b;
+        traj_cloud->points.push_back(cam_pt_tl);
+        
+        cam_pt_tr.x = world_top_right.x();
+        cam_pt_tr.y = world_top_right.y();
+        cam_pt_tr.z = world_top_right.z();
+        cam_pt_tr.r = cam_r;
+        cam_pt_tr.g = cam_g;
+        cam_pt_tr.b = cam_b;
+        traj_cloud->points.push_back(cam_pt_tr);
+        
+        cam_pt_bl.x = world_bottom_left.x();
+        cam_pt_bl.y = world_bottom_left.y();
+        cam_pt_bl.z = world_bottom_left.z();
+        cam_pt_bl.r = cam_r;
+        cam_pt_bl.g = cam_g;
+        cam_pt_bl.b = cam_b;
+        traj_cloud->points.push_back(cam_pt_bl);
+        
+        cam_pt_br.x = world_bottom_right.x();
+        cam_pt_br.y = world_bottom_right.y();
+        cam_pt_br.z = world_bottom_right.z();
+        cam_pt_br.r = cam_r;
+        cam_pt_br.g = cam_g;
+        cam_pt_br.b = cam_b;
+        traj_cloud->points.push_back(cam_pt_br);
+        
+        // Add lines connecting corners to center to create camera frustum
+        // We do this by adding pairs of points to create line segments
+        // First, duplicate the center point multiple times
+        for (int i = 0; i < 4; i++) {
+            pcl::PointXYZRGB center_dup = cam_pt_center;
+            traj_cloud->points.push_back(center_dup);
+        }
+        
+        // Then add the four corners again to create lines (as point pairs)
+        traj_cloud->points.push_back(cam_pt_tl);
+        traj_cloud->points.push_back(cam_pt_tr);
+        traj_cloud->points.push_back(cam_pt_tr); // Fixed: cam_pt_pt_tr -> cam_pt_tr
+        traj_cloud->points.push_back(cam_pt_br);
+        traj_cloud->points.push_back(cam_pt_br);
+        traj_cloud->points.push_back(cam_pt_bl);
+        traj_cloud->points.push_back(cam_pt_bl);
+        traj_cloud->points.push_back(cam_pt_tl);
+    }
+    
+    // Save the point cloud
+    std::string traj_viz_path = traj_dir + "/camera_trajectory_with_model.pcd";
+    pcl::io::savePCDFileBinary(traj_viz_path, *traj_cloud);
+    
+    std::cout << "Saved camera trajectory visualization with camera models to: " << traj_viz_path << std::endl;
+    std::cout << "Open with PCL viewer to see lines connecting points (e.g., pcl_viewer -ax 1 " << traj_viz_path << ")" << std::endl;
+    
+    return true;
+}
+
+void CalibProcessor::publishColoredPointCloud(const pcl::PointCloud<pcl::PointXYZRGB>::Ptr& cloud, double timestamp) {
+    if (!ros_initialized_ || !nh_) {
+        return;
+    }
+    
+    // Convert PCL point cloud to ROS message
+    sensor_msgs::PointCloud2 cloud_msg;
+    pcl::toROSMsg(*cloud, cloud_msg);  // This will now work with the proper include
+    
+    // Set header information with current time
+    cloud_msg.header.stamp = ros::Time(timestamp);
+    cloud_msg.header.frame_id = frame_id_;
+    
+    // Publish the point cloud
+    pointcloud_pub_.publish(cloud_msg);
+}
+
+void CalibProcessor::publishCameraPose(const Eigen::Matrix4d& camera_pose, double timestamp) {
+    if (!ros_initialized_ || !nh_) {
+        return;
+    }
+    
+    // Extract position
+    Eigen::Vector3d position = camera_pose.block<3, 1>(0, 3);
+    
+    // Extract rotation as quaternion
+    Eigen::Matrix3d rot = camera_pose.block<3, 3>(0, 0);
+    Eigen::Quaterniond q(rot);
+    q.normalize();
+    
+    ros::Time ros_time = ros::Time(timestamp);
+    
+    // Create a transform message for tf broadcasting
+    geometry_msgs::TransformStamped transform_stamped;
+    transform_stamped.header.stamp = ros_time;
+    transform_stamped.header.frame_id = frame_id_;
+    transform_stamped.child_frame_id = "camera";
+    
+    // Set the translation
+    transform_stamped.transform.translation.x = position.x();
+    transform_stamped.transform.translation.y = position.y();
+    transform_stamped.transform.translation.z = position.z();
+    
+    // Set the rotation
+    transform_stamped.transform.rotation.x = q.x();
+    transform_stamped.transform.rotation.y = q.y();
+    transform_stamped.transform.rotation.z = q.z();
+    transform_stamped.transform.rotation.w = q.w();
+    
+    // Broadcast the transform
+    tf_broadcaster_.sendTransform(transform_stamped);
+    
+    // Create marker array for camera visualization
+    visualization_msgs::MarkerArray marker_array;
+    
+    // Generate a unique ID based on timestamp to avoid overwriting previous markers
+    static int marker_id_counter = 0;
+    int base_id = marker_id_counter;
+    marker_id_counter += 10; // Increment by 10 to leave room for different marker types
+    
+    // Camera body marker
+    visualization_msgs::Marker camera_marker;
+    camera_marker.header.frame_id = frame_id_;
+    camera_marker.header.stamp = ros_time;
+    camera_marker.ns = "camera_bodies";
+    camera_marker.id = base_id;
+    camera_marker.type = visualization_msgs::Marker::CUBE;
+    camera_marker.action = visualization_msgs::Marker::ADD;
+    
+    // Set the pose
+    camera_marker.pose.position.x = position.x();
+    camera_marker.pose.position.y = position.y();
+    camera_marker.pose.position.z = position.z();
+    camera_marker.pose.orientation.x = q.x();
+    camera_marker.pose.orientation.y = q.y();
+    camera_marker.pose.orientation.z = q.z();
+    camera_marker.pose.orientation.w = q.w();
+    
+    // Set the scale (size of the camera visualization)
+    camera_marker.scale.x = 0.5;  // Increased width from 0.1
+    camera_marker.scale.y = 0.5;  // Increased height from 0.1
+    camera_marker.scale.z = 0.2;  // Increased thickness from 0.05
+    
+    // Set the color
+    camera_marker.color.r = 0.8;
+    camera_marker.color.g = 0.2;
+    camera_marker.color.b = 0.2;
+    camera_marker.color.a = 1.0;
+    
+    // Set the lifetime (increase to make it persist longer)
+    camera_marker.lifetime = ros::Duration(0); // 0 means forever
+    
+    // Add camera marker to array
+    marker_array.markers.push_back(camera_marker);
+    
+    // Create camera frustum using LINE_LIST
+    visualization_msgs::Marker frustum_marker;
+    frustum_marker.header.frame_id = frame_id_;
+    frustum_marker.header.stamp = ros_time;
+    frustum_marker.ns = "camera_frustums";
+    frustum_marker.id = base_id + 1;
+    frustum_marker.type = visualization_msgs::Marker::LINE_LIST;
+    frustum_marker.action = visualization_msgs::Marker::ADD;
+    frustum_marker.pose.orientation.w = 1.0; // Identity quaternion
+    frustum_marker.scale.x = 0.025; // Increased line width from 0.01
+    frustum_marker.color.g = 0.8;
+    frustum_marker.color.b = 0.8;
+    frustum_marker.color.a = 1.0;
+    frustum_marker.lifetime = ros::Duration(0); // 0 means forever
+    
+    // Define frustum size - make the camera model larger
+    double near_plane = 0;  // Increased from 0.05
+    double far_plane = 3;   // Increased from 0.3
+    double fov_width = 1.5;   // Increased from 0.15
+    double fov_height = 1;  // Increased from 0.10
+    
+    // Near plane corners in camera coordinates (Z forward)
+    Eigen::Vector3d near_top_right(fov_width*near_plane/far_plane, -fov_height*near_plane/far_plane, near_plane);
+    Eigen::Vector3d near_top_left(-fov_width*near_plane/far_plane, -fov_height*near_plane/far_plane, near_plane);
+    Eigen::Vector3d near_bottom_right(fov_width*near_plane/far_plane, fov_height*near_plane/far_plane, near_plane);
+    Eigen::Vector3d near_bottom_left(-fov_width*near_plane/far_plane, fov_height*near_plane/far_plane, near_plane);
+    
+    // Far plane corners in camera coordinates (Z forward)
+    Eigen::Vector3d far_top_right(fov_width, -fov_height, far_plane);
+    Eigen::Vector3d far_top_left(-fov_width, -fov_height, far_plane);
+    Eigen::Vector3d far_bottom_right(fov_width, fov_height, far_plane);
+    Eigen::Vector3d far_bottom_left(-fov_width, fov_height, far_plane);
+    
+    // Apply camera rotation to frustum vertices
+    near_top_right = rot * near_top_right + position;
+    near_top_left = rot * near_top_left + position;
+    near_bottom_right = rot * near_bottom_right + position;
+    near_bottom_left = rot * near_bottom_left + position;
+    
+    far_top_right = rot * far_top_right + position;
+    far_top_left = rot * far_top_left + position;
+    far_bottom_right = rot * far_bottom_right + position;
+    far_bottom_left = rot * far_bottom_left + position;
+    
+    // Helper function to add a line
+    auto addLine = [&frustum_marker](const Eigen::Vector3d& start, const Eigen::Vector3d& end) {
+        geometry_msgs::Point p_start, p_end;
+        p_start.x = start.x(); p_start.y = start.y(); p_start.z = start.z();
+        p_end.x = end.x(); p_end.y = end.y(); p_end.z = end.z();
+        frustum_marker.points.push_back(p_start);
+        frustum_marker.points.push_back(p_end);
+    };
+    
+    // Near plane
+    addLine(near_top_left, near_top_right);
+    addLine(near_top_right, near_bottom_right);
+    addLine(near_bottom_right, near_bottom_left);
+    addLine(near_bottom_left, near_top_left);
+    
+    // Far plane
+    addLine(far_top_left, far_top_right);
+    addLine(far_top_right, far_bottom_right);
+    addLine(far_bottom_right, far_bottom_left);
+    addLine(far_bottom_left, far_top_left);
+    
+    // Connect near and far planes
+    addLine(near_top_left, far_top_left);
+    addLine(near_top_right, far_top_right);
+    addLine(near_bottom_right, far_bottom_right);
+    addLine(near_bottom_left, far_bottom_left);
+    
+    // Add coordinate axes marker
+    visualization_msgs::Marker axes_marker;
+    axes_marker.header.frame_id = frame_id_;
+    axes_marker.header.stamp = ros_time;
+    axes_marker.ns = "camera_axes";
+    axes_marker.id = base_id + 2;
+    axes_marker.type = visualization_msgs::Marker::LINE_LIST;
+    axes_marker.action = visualization_msgs::Marker::ADD;
+    axes_marker.pose.position = camera_marker.pose.position;
+    axes_marker.pose.orientation = camera_marker.pose.orientation;
+    axes_marker.scale.x = 0.04; // Increased line width from 0.02
+    axes_marker.lifetime = ros::Duration(0); // 0 means forever
+    
+    // Define axis lengths
+    double axis_length = 0.25; // Increased from 0.15
+    
+    // Define colors for axes (X=red, Y=green, Z=blue)
+    std_msgs::ColorRGBA red, green, blue;
+    red.r = 1.0; red.a = 1.0;
+    green.g = 1.0; green.a = 1.0;
+    blue.b = 1.0; blue.a = 1.0;
+    
+    // Add axis lines
+    geometry_msgs::Point origin, x_end, y_end, z_end;
+    origin.x = origin.y = origin.z = 0.0;
+    x_end.x = axis_length; x_end.y = x_end.z = 0.0;
+    y_end.y = axis_length; y_end.x = y_end.z = 0.0;
+    z_end.z = axis_length; z_end.x = z_end.y = 0.0;
+    
+    axes_marker.points.push_back(origin);
+    axes_marker.points.push_back(x_end);
+    axes_marker.points.push_back(origin);
+    axes_marker.points.push_back(y_end);
+    axes_marker.points.push_back(origin);
+    axes_marker.points.push_back(z_end);
+    
+    axes_marker.colors.push_back(red);
+    axes_marker.colors.push_back(red);
+    axes_marker.colors.push_back(green);
+    axes_marker.colors.push_back(green);
+    axes_marker.colors.push_back(blue);
+    axes_marker.colors.push_back(blue);
+    
+    // Add frustum and axes markers to array
+    marker_array.markers.push_back(frustum_marker);
+    marker_array.markers.push_back(axes_marker);
+    
+    // Publish markers
+    camera_pose_pub_.publish(marker_array);
+    
+    // Update and publish camera trajectory
+    geometry_msgs::PoseStamped pose_stamped;
+    pose_stamped.header.frame_id = frame_id_;
+    pose_stamped.header.stamp = ros_time;
+    pose_stamped.pose.position.x = position.x();
+    pose_stamped.pose.position.y = position.y();
+    pose_stamped.pose.position.z = position.z();
+    pose_stamped.pose.orientation.x = q.x();
+    pose_stamped.pose.orientation.y = q.y();
+    pose_stamped.pose.orientation.z = q.z();
+    pose_stamped.pose.orientation.w = q.w();
+    
+    camera_trajectory_.push_back(pose_stamped);
+    
+    // Keep trajectory at a reasonable size
+    if (camera_trajectory_.size() > 1000) {
+        camera_trajectory_.erase(camera_trajectory_.begin());
+    }
+    
+    // Publish path for trajectory visualization
+    nav_msgs::Path path_msg;
+    path_msg.header.frame_id = frame_id_;
+    path_msg.header.stamp = ros_time;
+    path_msg.poses = camera_trajectory_;
+    
+    camera_trajectory_pub_.publish(path_msg);
+}
+
+void CalibProcessor::publishMatchImage(const std::string& image_path, double timestamp) {
+    if (!ros_initialized_ || !nh_) {
+        return;
+    }
+    
+    // Load the match visualization image
+    cv::Mat match_image = cv::imread(image_path);
+    if (match_image.empty()) {
+        ROS_WARN("Failed to load match visualization image: %s", image_path.c_str());
+        return;
+    }
+    
+    // Convert OpenCV image to ROS message
+    sensor_msgs::ImagePtr img_msg = cv_bridge::CvImage(
+        std_msgs::Header(), "bgr8", match_image).toImageMsg();
+    
+    // Set timestamp
+    img_msg->header.stamp = ros::Time(timestamp);
+    img_msg->header.frame_id = "camera";
+    
+    // Publish the image
+    match_image_pub_.publish(img_msg);
+    
+    ROS_DEBUG("Published match visualization image");
+}
+}

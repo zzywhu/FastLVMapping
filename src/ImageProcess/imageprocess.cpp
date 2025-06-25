@@ -1,4 +1,5 @@
 #include "ImageProcess/imageprocess.h"
+#include "config.h"
 #include <limits>
 #include <opencv2/opencv.hpp>
 #include <Eigen/Dense>
@@ -204,69 +205,73 @@ cv::Mat ImageProcess::projectPinhole(const pcl::PointCloud<pcl::PointXYZI>::Ptr&
 }
 
 std::pair<cv::Mat, cv::Mat> ImageProcess::projectPinholeWithIndices(const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud, bool isinter) {
-    // 设置图像尺寸
-    const int IMG_HEIGHT = 800;  // 图像高度
-    const int IMG_WIDTH = 800;   // 图像宽度
+    // Get projection parameters from config
+    const lvmapping::Config& config = lvmapping::Config::getInstance();
+    const auto& proj_params = config.projectionParams();
     
-    // 设置相机内参
-    const float fx = 400.0f;     // 焦距x
-    const float fy = 400.0f;     // 焦距y
-    const float cx = IMG_WIDTH / 2.0f;   // 光心x坐标
-    const float cy = IMG_HEIGHT / 2.0f;  // 光心y坐标
+    // Set image dimensions from config
+    const int IMG_HEIGHT = proj_params.image_height;
+    const int IMG_WIDTH = proj_params.image_width;
     
-    // 创建强度图，初始化为0
+    // Set camera intrinsics from config
+    const float fx = static_cast<float>(proj_params.focal_length);
+    const float fy = static_cast<float>(proj_params.focal_length);
+    const float cx = static_cast<float>(proj_params.image_center_x);
+    const float cy = static_cast<float>(proj_params.image_center_y);
+    
+    // Create intensity image, initialized to 0
     cv::Mat intensityImage = cv::Mat::zeros(IMG_HEIGHT, IMG_WIDTH, CV_32F);
     
-    // 创建索引图，初始化为-1（表示没有对应点云点）
+    // Create index map, initialized to -1 (indicating no corresponding point cloud point)
     cv::Mat indexMap = cv::Mat(IMG_HEIGHT, IMG_WIDTH, CV_32S, cv::Scalar(-1));
     
-    // 如果点云为空，返回空图像
+    // If point cloud is empty, return empty image
     if(cloud->size() == 0) {
         cv::Mat emptyImage = cv::Mat::zeros(IMG_HEIGHT, IMG_WIDTH, CV_8U);
         return {emptyImage, indexMap};
     }
     
-    // 创建深度图，用于处理遮挡
+    // Create depth map for handling occlusions
     cv::Mat depthMap = cv::Mat::zeros(IMG_HEIGHT, IMG_WIDTH, CV_32F);
-    depthMap.setTo(std::numeric_limits<float>::max());  // 初始化为最大值
+    depthMap.setTo(std::numeric_limits<float>::max());  // Initialize to maximum value
     
-    // 投影点云到图像平面
+    // Project point cloud onto image plane
     for (size_t i = 0; i < cloud->points.size(); ++i) {
         const auto& p = cloud->points[i];
         
-        // 只处理相机前方的点（假设相机朝向-x方向）
+        // Only process points in front of the camera
         if(p.z < 0) {
             continue;
         }
         
-        // 计算投影点坐标
+        // Calculate projected point coordinates
         float x = p.x;
         float y = p.y;
         float z = p.z;
         
-        // 针孔投影
-        float depth = z;  // 深度值为x轴距离
+        // Pinhole projection
+        float depth = z;  // Depth value is the z-axis distance
         
-        // 如果深度为0或负数，跳过
+        // Skip if depth is 0 or negative
         if(depth <= 0) {
             continue;
         }
         
-        // 计算像素坐标
+        // Calculate pixel coordinates
         float u = (fx * x / z) + cx;
         float v = (fy * y / z) + cy;
         
-        // 检查像素坐标是否在图像范围内
+        // Check if pixel coordinates are within image bounds
         if (u >= 0 && u < IMG_WIDTH && v >= 0 && v < IMG_HEIGHT) {
-            // 强制转换为整数坐标
+            // Force convert to integer coordinates
             int ui = static_cast<int>(u);
             int vi = static_cast<int>(v);
             
-            // 处理遮挡（近处的点覆盖远处的点）
+            // Handle occlusions (closer points override further points)
             if (depth < depthMap.at<float>(vi, ui)) {
                 depthMap.at<float>(vi, ui) = depth;
                 intensityImage.at<float>(vi, ui) = p.intensity;
-                indexMap.at<int>(vi, ui) = static_cast<int>(i); // 记录点云索引
+                indexMap.at<int>(vi, ui) = static_cast<int>(i); // Record point cloud index
             }
         }
     }

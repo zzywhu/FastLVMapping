@@ -18,6 +18,7 @@ void Config::setDefaultValues() {
     camera_params_.new_camera_matrix = cv::Mat::eye(3, 3, CV_64F);
     camera_params_.resize_camera_matrix = cv::Mat::eye(3, 3, CV_64F);
     camera_params_.distortion_coeffs = cv::Mat::zeros(4, 1, CV_64F);
+    camera_params_.camera_model = "fisheye";  // Default to fisheye
     
     // Set default calibration parameters
     calib_params_.T_lidar_camera = Eigen::Matrix4d::Identity();
@@ -65,10 +66,15 @@ bool Config::loadFromYAML(const std::string& config_file) {
         return false;
     }
 
-        fs["camera_matrix"] >> camera_params_.camera_matrix;
-        fs["new_camera_matrix"] >> camera_params_.new_camera_matrix;
-        fs["resize_camera_matrix"] >> camera_params_.resize_camera_matrix;
-        fs["distortion_coefficients"] >> camera_params_.distortion_coeffs;
+    // Read camera model
+    if (fs["camera_model"].isString())
+        camera_params_.camera_model = fs["camera_model"].string();
+    
+    // Read camera parameters
+    fs["camera_matrix"] >> camera_params_.camera_matrix;
+    fs["new_camera_matrix"] >> camera_params_.new_camera_matrix;
+    fs["resize_camera_matrix"] >> camera_params_.resize_camera_matrix;
+    fs["distortion_coefficients"] >> camera_params_.distortion_coeffs;
     
     // Read extrinsics if available
     cv::Mat T_lidar_cam;
@@ -140,6 +146,9 @@ bool Config::loadFromYAML(const std::string& config_file) {
 
 void Config::saveToYAML(const std::string& config_file) const {
     cv::FileStorage fs(config_file, cv::FileStorage::WRITE);
+    
+    // Save camera model
+    fs << "camera_model" << camera_params_.camera_model;
     
     // Save camera parameters
     fs << "camera_matrix" << camera_params_.camera_matrix;

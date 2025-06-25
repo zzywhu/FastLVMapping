@@ -25,6 +25,7 @@ public:
         cv::Mat new_camera_matrix;     // New camera matrix after undistortion
         cv::Mat resize_camera_matrix;  // Camera matrix for resized images
         cv::Mat distortion_coeffs;     // Distortion coefficients
+        std::string camera_model;      // Camera model: "fisheye" or "pinhole"
     };
 
     // Calibration parameters

@@ -123,6 +123,7 @@ private:
     cv::Mat newcamera_matrix_;
     cv::Mat resizecamera_matrix_;
     cv::Mat dist_coeffs_;
+    std::string camera_model_;         // Added camera model string
     
     Eigen::Matrix4d T_lidar_camera_;      // Initial LiDAR to camera transformation
     Eigen::Matrix4d T_lidar_camera_update_; // Updated LiDAR to camera transformation

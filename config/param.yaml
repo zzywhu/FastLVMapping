@@ -1,9 +1,0 @@
-%YAML:1.0
-
-pcd_path: "/media/zzy/T7/SLAM_DATASET/Rot_LVI-SLAM/calib_data/test_color_mapping/loop3/MapCloud.pcd"
-
-img_path: "/media/zzy/T7/SLAM_DATASET/Rot_LVI-SLAM/LOOP/loop3/3/2"
-
-traj_path: "/media/zzy/T7/SLAM_DATASET/Rot_LVI-SLAM/calib_data/test_color_mapping/loop3/traj.txt"
-
-output_path: "/media/zzy/T7/SLAM_DATASET/Rot_LVI-SLAM/calib_data/test_color_mapping/loop3/result"

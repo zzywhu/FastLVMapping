@@ -47,13 +47,15 @@ void suggestVisualizationTools(const std::string& pcd_path) {
  */
 int main(int argc, char** argv)
 {
-    // Load configuration file
-    std::string config_file = "/home/zzy/SensorCalibration/FastLVMapping/config/param.yaml";
+    // Default configuration file path
+    std::string config_file = "/home/zzy/SensorCalibration/FastLVMapping/config/default_config.yaml";
     
     // Command line argument can override config path
     if (argc > 1) {
         config_file = argv[1];
     }
+    
+    std::cout << "Using configuration file: " << config_file << std::endl;
     
     // Create a CalibProcessor instance
     lvmapping::CalibProcessor calib;

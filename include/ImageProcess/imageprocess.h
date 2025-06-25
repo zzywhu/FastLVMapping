@@ -5,8 +5,7 @@
 #include <opencv2/opencv.hpp>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
-#include <Eigen/Core>
-#include <Eigen/Dense>
+#include "config.h"  // Add config header
 
 class ImageProcess {
 public:

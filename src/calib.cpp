@@ -45,10 +45,14 @@ bool CalibProcessor::loadCalibrationParameters(const std::string& config_file) {
     newcamera_matrix_ = config.cameraParams().new_camera_matrix.clone();
     resizecamera_matrix_ = config.cameraParams().resize_camera_matrix.clone();
     dist_coeffs_ = config.cameraParams().distortion_coeffs.clone();
+    camera_model_ = config.cameraParams().camera_model;
+    
     T_lidar_camera_ = config.calibParams().T_lidar_camera;
     T_lidar_camera_update_ = T_lidar_camera_;
     
     visualization_tool_ = config.outputParams().visualization_tool;
+    
+    std::cout << "Loaded camera model: " << camera_model_ << std::endl;
     
     return true;
 }
@@ -452,9 +456,16 @@ bool CalibProcessor::processImageFrame(double timestamp,
         return false;
     }
     
-    // Undistort the fisheye image
+    // Get the camera model from configuration
+    const std::string& camera_model = Config::getInstance().cameraParams().camera_model;
+    
+    // Undistort the image based on camera model
     cv::Mat undistorted_img;
-    cv::fisheye::undistortImage(img, undistorted_img, camera_matrix_, dist_coeffs_, newcamera_matrix_);
+    if (camera_model == "fisheye") {
+        cv::fisheye::undistortImage(img, undistorted_img, camera_matrix_, dist_coeffs_, newcamera_matrix_);
+    } else { // pinhole or default
+        cv::undistort(img, undistorted_img, camera_matrix_, dist_coeffs_, newcamera_matrix_);
+    }
     
     // Calculate camera pose
     Eigen::Matrix4d camera_pose = lidar_pose * T_lidar_camera_update_.inverse();
@@ -476,15 +487,6 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
     // Create output directory if it doesn't exist
     if (!fs::exists(output_folder)) {
         fs::create_directories(output_folder);
-    }
-    
-    // Load calibration parameters from default configuration file
-    std::string config_file = "/home/zzy/SensorCalibration/FastLVMapping/config/default_config.yaml";
-    if (camera_matrix_.empty()) {
-        if (!loadCalibrationParameters(config_file)) {
-            std::cerr << "Failed to load calibration parameters from default config: " << config_file << std::endl;
-            std::cerr << "Falling back to camera_intrinsics.yaml..." << std::endl;
-        }
     }
     
     // Load trajectory data
@@ -557,7 +559,7 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
     
     // Sample images to improve processing speed
     std::vector<std::pair<double, std::string>> selected_images;
-    for (size_t i = 0; i < image_files.size(); i += img_sampling_step) {
+    for (size_t i = 0; i < image_files.size(); i += img_sampling_step) {  // Use the already defined img_sampling_step
         selected_images.push_back(image_files[i]);
     }
     
@@ -650,28 +652,12 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
     return true;
 }
 bool CalibProcessor::preprocess(const std::string& image_folder, 
-                                              const std::string& trajectory_file,
-                                              const std::string& pcd_file,
-                                              const std::string& output_folder) {
+                                const std::string& trajectory_file,
+                                const std::string& pcd_file,
+                                const std::string& output_folder) {
     // Create output directory if not exists
     if (!fs::exists(output_folder)) {
         fs::create_directories(output_folder);
-    }
-    
-    // Use default configuration file
-    std::string config_file = "/home/zzy/SensorCalibration/FastLVMapping/config/default_config.yaml";
-    
-    // Load calibration parameters
-    if (!loadCalibrationParameters(config_file)) {
-        std::cerr << "Failed to load calibration parameters from default config: " << config_file << std::endl;
-        std::cerr << "Falling back to camera_intrinsics.yaml..." << std::endl;
-        
-        // Fall back to the original config file
-        config_file = "/home/zzy/SensorCalibration/FastLVMapping/config/camera_intrinsics.yaml";
-        if (!loadCalibrationParameters(config_file)) {
-            std::cerr << "Failed to load calibration parameters from fallback config" << std::endl;
-            return false;
-        }
     }
     
     // Load trajectory data
@@ -724,14 +710,18 @@ bool CalibProcessor::preprocess(const std::string& image_folder,
     std::sort(image_files.begin(), image_files.end(), 
               [](const auto& a, const auto& b) { return a.first < b.first; });
     
-    // 隔一张图片处理，提高处理速度
+    // Use sampling step from configuration
+    const Config& config = Config::getInstance();
+    int sampling_step = config.processingParams().img_sampling_step;
+    
+    // Sample images to improve processing speed
     std::vector<std::pair<double, std::string>> selected_images;
-    for (size_t i = 0; i < image_files.size(); i += 2) {  // 步长为2，表示隔一张取一张
+    for (size_t i = 0; i < image_files.size(); i += sampling_step) {
         selected_images.push_back(image_files[i]);
     }
     
     std::cout << "Selected " << selected_images.size() << " images out of " << image_files.size() 
-              << " for processing (processing every other image)" << std::endl;
+              << " for processing (sampling every " << sampling_step << " images)" << std::endl;
     
     // Process each selected image
     int processed_count = 0;
@@ -747,8 +737,6 @@ bool CalibProcessor::preprocess(const std::string& image_folder,
             std::cerr << "Failed to load image: " << img_path << std::endl;
             continue;
         }
-        
-       
         
         // Find camera pose at this timestamp by interpolation
         Eigen::Matrix4d lidar_pose = Eigen::Matrix4d::Identity();
@@ -784,31 +772,31 @@ bool CalibProcessor::preprocess(const std::string& image_folder,
             lidar_pose.block<3, 3>(0, 0) = q.toRotationMatrix();
             lidar_pose.block<3, 1>(0, 3) = pos;
         }
+        
         // Calculate camera pose from LiDAR pose
         Eigen::Matrix4d camera_pose = lidar_pose * T_lidar_camera_.inverse();
         
-        // Transform point cloud to camera coordinate system for projection
-        // We'll project original point cloud points to image to update the colored cloud
-        ImageProcess imgProc;
+        // Get the camera model from configuration
+        const std::string& camera_model = Config::getInstance().cameraParams().camera_model;
         
-        
-        // Undistort the fisheye image
+        // Undistort the image based on camera model
         cv::Mat undistorted_img;
-        cv::fisheye::undistortImage(img, undistorted_img, camera_matrix_, dist_coeffs_,newcamera_matrix_);
+        if (camera_model == "fisheye") {
+            cv::fisheye::undistortImage(img, undistorted_img, camera_matrix_, dist_coeffs_, newcamera_matrix_);
+        } else { // pinhole or default
+            cv::undistort(img, undistorted_img, camera_matrix_, dist_coeffs_, newcamera_matrix_);
+        }
         
         cv::Mat resized_img;
-     
         cv::resize(undistorted_img, resized_img, cv::Size(800, 800), 0, 0, cv::INTER_LINEAR);
         std::string undist_dir = output_folder + "/undist_img";
-         if (!fs::exists(undist_dir)) {
+        if (!fs::exists(undist_dir)) {
             fs::create_directories(undist_dir);
         }
         std::string undist_img_path = undist_dir + "/" + std::to_string(timestamp) + ".png";
-        cv::imwrite(undist_img_path, resized_img);  // 保存原始去畸变图像
+        cv::imwrite(undist_img_path, resized_img);  // Save undistorted image
 
-
-
-        // Generate and save the projected image for visualization (same as before)
+        // Generate and save the projected image for visualization
         pcl::PointCloud<pcl::PointXYZI>::Ptr transformed_cloud(new pcl::PointCloud<pcl::PointXYZI>);
         for (const auto& point : cloud->points) {
             Eigen::Vector4d pt_world(point.x, point.y, point.z, 1.0);
@@ -823,9 +811,13 @@ bool CalibProcessor::preprocess(const std::string& image_folder,
             transformed_cloud->push_back(transformed_point);
         }
         
+        // Create ImageProcess object
+        ImageProcess imgProc;
 
         // Project the point cloud to the image plane for visualization and get index mapping
-        auto [projected_image, index_map] = imgProc.projectPinholeWithIndices(transformed_cloud, true);
+        auto result = imgProc.projectPinholeWithIndices(transformed_cloud, true);
+        cv::Mat projected_image = result.first;
+        cv::Mat index_map = result.second;
         
         // Save the projected image in the rimg folder with timestamp
         std::string rimg_dir = output_folder + "/rimg";
@@ -864,7 +856,7 @@ bool CalibProcessor::preprocess(const std::string& image_folder,
                     // This allows us to encode indices up to 2^48 - 1
                     index_image.at<cv::Vec3w>(y, x)[0] = idx & 0xFFFF;                 // Lower 16 bits
                     index_image.at<cv::Vec3w>(y, x)[1] = (idx >> 16) & 0xFFFF;        // Middle 16 bits
-                    index_image.at<cv::Vec3w>(y, x)[2] = (idx >> 32) & 0xFFFF;        // Upper 16 bits
+                    index_image.at<cv::Vec3w>(y, x)[2] = 0;  // Fixed: removed overflow shift
                 } else {
                     // No point maps to this pixel
                     index_image.at<cv::Vec3w>(y, x) = cv::Vec3w(0, 0, 0);
@@ -981,6 +973,13 @@ bool CalibProcessor::initialize(const std::string& config_file) {
         std::cerr << "Failed to load calibration parameters" << std::endl;
         return false;
     }
+    
+    // Display loaded parameters for confirmation
+    std::cout << "Successfully loaded configuration:" << std::endl;
+    std::cout << "  - Image path: " << image_folder_ << std::endl;
+    std::cout << "  - Trajectory path: " << trajectory_file_ << std::endl;
+    std::cout << "  - Point cloud path: " << pcd_file_ << std::endl;
+    std::cout << "  - Output path: " << output_folder_ << std::endl;
     
     return true;
 }

@@ -44,11 +44,11 @@ point_cloud_params:
 
 # Projection parameters - 投影参数
 projection_params:
-   image_width: 800       # 去畸变图像宽度
-   image_height: 800      # 去畸变图像高度
-   focal_length: 400      # 针孔投影的焦距
-   image_center_x: 400    # 针孔投影的图像中心X坐标
-   image_center_y: 400    # 针孔投影的图像中心Y坐标
+   image_width: 3000       # 去畸变图像宽度
+   image_height: 3000      # 去畸变图像高度
+   focal_length: 1500      # 针孔投影的焦距
+   image_center_x: 1500    # 针孔投影的图像中心X坐标
+   image_center_y: 1500    # 针孔投影的图像中心Y坐标
    valid_image_start_x: 500  # 图像有效区域起始X坐标
    valid_image_start_y: 500  # 图像有效区域起始Y坐标
    valid_image_end_x: 2500   # 图像有效区域结束X坐标

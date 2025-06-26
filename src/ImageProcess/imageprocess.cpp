@@ -208,16 +208,16 @@ std::pair<cv::Mat, cv::Mat> ImageProcess::projectPinholeWithIndices(const pcl::P
     // Get projection parameters from config
     const lvmapping::Config& config = lvmapping::Config::getInstance();
     const auto& proj_params = config.projectionParams();
-    
+    cv::Mat resize_matrix_ = config.cameraParams().resize_camera_matrix.clone();
     // Set image dimensions from config
-    const int IMG_HEIGHT = proj_params.image_height;
-    const int IMG_WIDTH = proj_params.image_width;
+    const int IMG_HEIGHT = resize_matrix_.at<float>(1,2)*2;
+    const int IMG_WIDTH = resize_matrix_.at<float>(0,2)*2;
     
     // Set camera intrinsics from config
-    const float fx = static_cast<float>(proj_params.focal_length);
-    const float fy = static_cast<float>(proj_params.focal_length);
-    const float cx = static_cast<float>(proj_params.image_center_x);
-    const float cy = static_cast<float>(proj_params.image_center_y);
+    const float fx = static_cast<float>(resize_matrix_.at<float>(0,0));
+    const float fy = static_cast<float>(resize_matrix_.at<float>(1,1));
+    const float cx = static_cast<float>(resize_matrix_.at<float>(0,2));
+    const float cy = static_cast<float>(resize_matrix_.at<float>(1,2));
     
     // Create intensity image, initialized to 0
     cv::Mat intensityImage = cv::Mat::zeros(IMG_HEIGHT, IMG_WIDTH, CV_32F);

@@ -7,12 +7,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # 添加编译优化标志
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -DNDEBUG")
 
+# 添加信号处理支持标志
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_GLIBCXX_ASSERTIONS")
+
 # 添加OpenMP支持 - 改进检测和标志设置
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
     add_definitions(-DOPENMP_FOUND=1)
-    message(STATUS "Building with OpenMP support")
+    # 添加OpenMP取消支持，使Ctrl+C能够正确传播到所有线程
+    add_definitions(-DOMP_CANCELLATION=1)
+    message(STATUS "Building with OpenMP support (with cancellation enabled)")
 else()
     add_definitions(-DOPENMP_FOUND=0)
     message(STATUS "OpenMP not found. Parallel processing disabled.")
@@ -38,12 +43,15 @@ find_package(OpenCV REQUIRED)
 find_package(PCL REQUIRED)
 find_package(Eigen3 REQUIRED)
 
+# 添加线程库支持
+find_package(Threads REQUIRED)
+
 # Catkin包设置
 catkin_package(
   INCLUDE_DIRS include
   LIBRARIES fast_lv_mapping
   CATKIN_DEPENDS roscpp std_msgs sensor_msgs nav_msgs geometry_msgs cv_bridge pcl_ros pcl_conversions tf2_ros tf2 visualization_msgs image_transport
-  DEPENDS OpenCV PCL EIGEN3
+  DEPENDS OpenCV PCL EIGEN3 Threads
 )
 
 # 设置包含目录

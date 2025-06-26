@@ -10,50 +10,37 @@
  */
 int main(int argc, char** argv)
 {
-    // Initialize ROS (even if we don't use ROS features)
+    // Initialize ROS properly to avoid the "You must call ros::init() before creating the first NodeHandle" error
     ros::init(argc, argv, "fast_lv_preprocess", ros::init_options::AnonymousName);
+    ros::NodeHandle nh;
     
-    // Get the config file path from the command line or from ROS parameter
+    // Get the config file path from command line arguments
     std::string config_file;
     if (argc > 1) {
         config_file = argv[1];
     } else {
-        ros::NodeHandle pnh("~");
-        if (!pnh.getParam("config_file", config_file)) {
-            // Default config file if not specified
-            config_file = "../config/default_config.yaml";
-            ROS_WARN("No config file specified, using default: %s", config_file.c_str());
-        }
+        // Use default config file
+        config_file = "/home/zzy/SensorCalibration/EasyColor/src/FastLVMapping/config/default_config.yaml";
     }
-
+    
     std::cout << "Using configuration file: " << config_file << std::endl;
     
-    // Create a CalibProcessor instance
-    lvmapping::CalibProcessor calib;
+    // Create processor without a ROS node handle to avoid publishing
+    lvmapping::CalibProcessor processor;
     
-    // Initialize calibration with config file
-    if (!calib.initialize(config_file)) {
-        std::cerr << "Failed to initialize calibration with config file: " << config_file << std::endl;
-        return -1;
+    // Initialize with config file
+    if (!processor.initialize(config_file)) {
+        std::cerr << "Failed to initialize processor with config: " << config_file << std::endl;
+        return 1;
     }
     
+    // Run preprocessing function
     std::cout << "Starting preprocessing..." << std::endl;
-    
-    // Run preprocessing only
-    bool success = calib.runPreprocessing();
-    
-    if (success) {
-        std::cout << "\n===========================================";
-        std::cout << "\nPreprocessing completed successfully." << std::endl;
-        std::cout << "Now you can run the main calibration process." << std::endl;
-        std::cout << "After calibration, additional outputs will include:" << std::endl;
-        std::cout << " - Optimized camera poses" << std::endl;
-        std::cout << " - 3D visualization of camera trajectory with camera models" << std::endl;
-        std::cout << " - Optimized extrinsics parameters for each timestamp" << std::endl;
-    } else {
-        std::cerr << "Error during preprocessing." << std::endl;
-        return -1;
+    if (!processor.runPreprocessing()) {
+        std::cerr << "Preprocessing failed!" << std::endl;
+        return 1;
     }
-
+    
+    std::cout << "Preprocessing completed successfully!" << std::endl;
     return 0;
 }

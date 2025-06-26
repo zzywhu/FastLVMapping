@@ -7,6 +7,7 @@
 #include <pcl/point_types.h>
 #include <Eigen/Dense>
 #include <memory>
+#include "signal_handler.h"
 
 // Add ROS headers
 #include <ros/ros.h>
@@ -75,12 +76,24 @@ public:
      * @param trajectory_file File containing LiDAR trajectory
      * @param pcd_file Point cloud file to colorize
      * @param output_folder Folder for output results
+     * @param output_cloud_ptr Pointer to store colored cloud for emergency save
+     * @param output_color_count_ptr Pointer to store color count for emergency save
      * @return true if processing was successful, false otherwise
      */
     bool processImagesAndPointCloud(const std::string& image_folder,
                                    const std::string& trajectory_file,
                                    const std::string& pcd_file,
-                                   const std::string& output_folder);
+                                   const std::string& output_folder,
+                                   boost::shared_ptr<pcl::PointCloud<pcl::PointXYZRGB>>* output_cloud_ptr = nullptr,
+                                   std::vector<int>** output_color_count_ptr = nullptr);
+    
+    // Keep the original method for backward compatibility
+    bool processImagesAndPointCloud(const std::string& image_folder,
+                                   const std::string& trajectory_file,
+                                   const std::string& pcd_file,
+                                   const std::string& output_folder) {
+        return processImagesAndPointCloud(image_folder, trajectory_file, pcd_file, output_folder, nullptr, nullptr);
+    }
 
     /**
      * @brief Preprocess images and point cloud data for further processing

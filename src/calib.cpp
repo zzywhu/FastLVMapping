@@ -1,6 +1,7 @@
 #include "calib.h"
 #include "config.h"
 #include "ImageProcess/imageprocess.h"
+#include "signal_handler.h"
 #include <pcl/io/pcd_io.h>
 #include <fstream>
 #include <algorithm>
@@ -414,46 +415,75 @@ bool CalibProcessor::colorizePointCloud(const cv::Mat& undistorted_img,
     cv::Mat depth_viz_img = undistorted_img.clone();
     
     // 创建视锥体过滤
-    Eigen::Matrix4d camera_to_world = camera_pose;
     Eigen::Matrix4d world_to_camera = camera_pose.inverse();
     
     // 创建深度缓冲区和点索引缓冲区
     cv::Mat depth_buffer(depth_viz_img.size(), CV_32F, cv::Scalar(std::numeric_limits<float>::max()));
     cv::Mat point_index_buffer(depth_viz_img.size(), CV_32S, cv::Scalar(-1));
     
-    // 过滤相机视锥体外的点
-    pcl::PointCloud<pcl::PointXYZI>::Ptr filtered_cloud(new pcl::PointCloud<pcl::PointXYZI>);
-    std::vector<int> original_indices;
+    // 优化步骤1：预分配空间以减少锁竞争
+    std::vector<pcl::PointXYZI> filtered_points;
+    std::vector<int> filtered_indices;
+    filtered_points.reserve(cloud->size() / 4); // 预估可见点约占总点数的1/4
+    filtered_indices.reserve(cloud->size() / 4);
     
-    // 视锥体过滤
-    #pragma omp parallel for schedule(dynamic, 1000) if(OPENMP_FOUND)
-    for (size_t i = 0; i < cloud->points.size(); i++) {
-        Eigen::Vector4d pt_world(cloud->points[i].x, cloud->points[i].y, cloud->points[i].z, 1.0);
-        Eigen::Vector4d pt_camera = world_to_camera * pt_world;
+    // 优化步骤2：使用更大的块大小，让每个线程处理更多连续的点
+    const size_t block_size = 4096; // 更大块大小，减少线程调度开销
+
+    // 优化步骤3：先过滤所有点，分成两阶段来减少线程同步和临界区
+    #pragma omp parallel if(OPENMP_FOUND)
+    {
+        // 每个线程局部存储过滤后的点，避免频繁的锁竞争
+        std::vector<pcl::PointXYZI> local_filtered_points;
+        std::vector<int> local_filtered_indices;
+        local_filtered_points.reserve(block_size);
+        local_filtered_indices.reserve(block_size);
         
-        // 基本剔除: 点在相机后面或太远
-        if (pt_camera[2] <= 0 || pt_camera[2] >= pc_params.max_depth) continue;
-        
-        // 投影到图像平面
-        int px = static_cast<int>(proj_params.focal_length * pt_camera[0] / pt_camera[2] + proj_params.image_center_x);
-        int py = static_cast<int>(proj_params.focal_length * pt_camera[1] / pt_camera[2] + proj_params.image_center_y);
-        
-        // 检查是否在有效图像边界内
-        if (px >= proj_params.valid_image_start_x && px < proj_params.valid_image_end_x && 
-            py >= proj_params.valid_image_start_y && py < proj_params.valid_image_end_y) {
+        // 第一阶段：视锥体过滤
+        #pragma omp for schedule(dynamic, block_size)
+        for (size_t i = 0; i < cloud->points.size(); i++) {
+            Eigen::Vector4d pt_world(cloud->points[i].x, cloud->points[i].y, cloud->points[i].z, 1.0);
+            Eigen::Vector4d pt_camera = world_to_camera * pt_world;
             
-            #pragma omp critical
-            {
-                filtered_cloud->push_back(cloud->points[i]);
-                original_indices.push_back(i);
+            // 基本剔除: 点在相机后面或太远
+            if (pt_camera[2] <= 0 || pt_camera[2] >= pc_params.max_depth) continue;
+            
+            // 投影到图像平面
+            int px = static_cast<int>(proj_params.focal_length * pt_camera[0] / pt_camera[2] + proj_params.image_center_x);
+            int py = static_cast<int>(proj_params.focal_length * pt_camera[1] / pt_camera[2] + proj_params.image_center_y);
+            
+            // 检查是否在有效图像边界内
+            if (px >= proj_params.valid_image_start_x && px < proj_params.valid_image_end_x && 
+                py >= proj_params.valid_image_start_y && py < proj_params.valid_image_end_y) {
+                // 添加到本地线程存储
+                local_filtered_points.push_back(cloud->points[i]);
+                local_filtered_indices.push_back(i);
             }
+        }
+        
+        // 合并本地结果到全局容器
+        #pragma omp critical
+        {
+            filtered_points.insert(filtered_points.end(), local_filtered_points.begin(), local_filtered_points.end());
+            filtered_indices.insert(filtered_indices.end(), local_filtered_indices.begin(), local_filtered_indices.end());
         }
     }
     
-    // 只处理视锥体内的点
-    for (size_t filtered_idx = 0; filtered_idx < filtered_cloud->points.size(); filtered_idx++) {
-        const auto& point = filtered_cloud->points[filtered_idx];
-        int original_idx = original_indices[filtered_idx];
+    // 优化步骤4：批量构建深度缓冲区，减少锁竞争
+    // 创建一个临时存储，用于后续处理
+    struct PointProjInfo {
+        int original_idx;
+        int px, py;
+        float depth;
+    };
+    
+    std::vector<PointProjInfo> proj_points;
+    proj_points.reserve(filtered_points.size());
+    
+    // 计算所有过滤后点的投影信息
+    for (size_t i = 0; i < filtered_points.size(); i++) {
+        const auto& point = filtered_points[i];
+        int original_idx = filtered_indices[i];
         
         Eigen::Vector4d pt_world(point.x, point.y, point.z, 1.0);
         Eigen::Vector4d pt_camera = world_to_camera * pt_world;
@@ -464,16 +494,49 @@ bool CalibProcessor::colorizePointCloud(const cv::Mat& undistorted_img,
         int px = static_cast<int>(proj_params.focal_length * pt_camera[0] / pt_camera[2] + proj_params.image_center_x);
         int py = static_cast<int>(proj_params.focal_length * pt_camera[1] / pt_camera[2] + proj_params.image_center_y);
         
-        // 更新邻域像素
-        for (int ny = std::max(proj_params.valid_image_start_y, py - pc_params.neighborhood_size); 
-             ny <= std::min(proj_params.valid_image_end_y - 1, py + pc_params.neighborhood_size); ny++) {
-            for (int nx = std::max(proj_params.valid_image_start_x, px - pc_params.neighborhood_size); 
-                 nx <= std::min(proj_params.valid_image_end_x - 1, px + pc_params.neighborhood_size); nx++) {
-                
-                // 如果当前点比缓冲区中的点更近
-                if (depth < depth_buffer.at<float>(ny, nx)) {
-                    depth_buffer.at<float>(ny, nx) = depth;
-                    point_index_buffer.at<int>(ny, nx) = original_idx;
+        proj_points.push_back({original_idx, px, py, depth});
+    }
+    
+    // 优化步骤5：使用分块策略更新深度缓冲区
+    // 将图像分成多个块，每个线程处理一个块
+    const int block_width = 64;  // 块宽度
+    const int block_height = 64; // 块高度
+    
+    int num_blocks_x = (proj_params.valid_image_end_x - proj_params.valid_image_start_x + block_width - 1) / block_width;
+    int num_blocks_y = (proj_params.valid_image_end_y - proj_params.valid_image_start_y + block_height - 1) / block_height;
+    int total_blocks = num_blocks_x * num_blocks_y;
+    
+    // 对每个图像块并行处理
+    #pragma omp parallel for schedule(dynamic) if(OPENMP_FOUND)
+    for (int block_idx = 0; block_idx < total_blocks; block_idx++) {
+        int block_x = block_idx % num_blocks_x;
+        int block_y = block_idx / num_blocks_x;
+        
+        int start_x = proj_params.valid_image_start_x + block_x * block_width;
+        int start_y = proj_params.valid_image_start_y + block_y * block_height;
+        int end_x = std::min(start_x + block_width, proj_params.valid_image_end_x);
+        int end_y = std::min(start_y + block_height, proj_params.valid_image_end_y);
+        
+        // 处理每个投影点，看它是否影响这个块
+        for (const auto& proj_info : proj_points) {
+            int px = proj_info.px;
+            int py = proj_info.py;
+            
+            // 检查点的影响区域是否与当前块重叠
+            int min_ny = std::max(start_y, py - pc_params.neighborhood_size);
+            int max_ny = std::min(end_y - 1, py + pc_params.neighborhood_size);
+            int min_nx = std::max(start_x, px - pc_params.neighborhood_size);
+            int max_nx = std::min(end_x - 1, px + pc_params.neighborhood_size);
+            
+            if (min_ny > max_ny || min_nx > max_nx) continue; // 不重叠，跳过
+            
+            // 更新重叠区域的深度缓冲区
+            for (int ny = min_ny; ny <= max_ny; ny++) {
+                for (int nx = min_nx; nx <= max_nx; nx++) {
+                    if (proj_info.depth < depth_buffer.at<float>(ny, nx)) {
+                        depth_buffer.at<float>(ny, nx) = proj_info.depth;
+                        point_index_buffer.at<int>(ny, nx) = proj_info.original_idx;
+                    }
                 }
             }
         }
@@ -481,49 +544,66 @@ bool CalibProcessor::colorizePointCloud(const cv::Mat& undistorted_img,
     
     // 第二阶段：给点云着色并创建可视化
     int colored_count = 0;
-    #pragma omp parallel for reduction(+:colored_count) collapse(2) if(OPENMP_FOUND)
-    for (int y = proj_params.valid_image_start_y; y < proj_params.valid_image_end_y; y++) {
-        for (int x = proj_params.valid_image_start_x; x < proj_params.valid_image_end_x; x++) {
-            int point_idx = point_index_buffer.at<int>(y, x);
-            if (point_idx >= 0) {
-                // 获取深度值
-                float depth = depth_buffer.at<float>(y, x);
-                
-                // 创建深度可视化
-                float normalized_depth = (depth - pc_params.min_depth) / (pc_params.max_depth - pc_params.min_depth);
-                normalized_depth = std::min(std::max(normalized_depth, 0.0f), 1.0f);
-                
-                int r = static_cast<int>((1.0f - normalized_depth) * 255);
-                int g = static_cast<int>((normalized_depth > 0.5f ? 1.0f - normalized_depth : normalized_depth) * 255);
-                int b = static_cast<int>(normalized_depth * 255);
-                
-                #pragma omp critical
-                {
-                    depth_viz_img.at<cv::Vec3b>(y, x) = cv::Vec3b(b, g, r);
+    std::atomic<int> atomic_colored_count(0);
+    
+    // 优化步骤6：使用图像块并行处理
+    #pragma omp parallel for collapse(2) schedule(dynamic) if(OPENMP_FOUND)
+    for (int by = 0; by < num_blocks_y; by++) {
+        for (int bx = 0; bx < num_blocks_x; bx++) {
+            int start_x = proj_params.valid_image_start_x + bx * block_width;
+            int start_y = proj_params.valid_image_start_y + by * block_height;
+            int end_x = std::min(start_x + block_width, proj_params.valid_image_end_x);
+            int end_y = std::min(start_y + block_height, proj_params.valid_image_end_y);
+            
+            // 块内局部计数器
+            int local_colored_count = 0;
+            
+            // 对块内每个像素处理
+            for (int y = start_y; y < end_y; y++) {
+                for (int x = start_x; x < end_x; x++) {
+                    int point_idx = point_index_buffer.at<int>(y, x);
+                    if (point_idx >= 0) {
+                        // 获取深度值
+                        float depth = depth_buffer.at<float>(y, x);
+                        
+                        // 创建深度可视化
+                        float normalized_depth = (depth - pc_params.min_depth) / (pc_params.max_depth - pc_params.min_depth);
+                        normalized_depth = std::min(std::max(normalized_depth, 0.0f), 1.0f);
+                        
+                        int r = static_cast<int>((1.0f - normalized_depth) * 255);
+                        int g = static_cast<int>((normalized_depth > 0.5f ? 1.0f - normalized_depth : normalized_depth) * 255);
+                        int b = static_cast<int>(normalized_depth * 255);
+                        
+                        depth_viz_img.at<cv::Vec3b>(y, x) = cv::Vec3b(b, g, r);
+                        
+                        // 给点云上色
+                        cv::Vec3b color = undistorted_img.at<cv::Vec3b>(y, x);
+                        
+                        // 更新点云颜色 - 无需临界区，因为每个点只会被一个深度缓冲区索引到
+                        colored_cloud->points[point_idx].b = color[0];
+                        colored_cloud->points[point_idx].g = color[1];
+                        colored_cloud->points[point_idx].r = color[2];
+                        
+                        // 标记这个点在此帧中被着色
+                        colored_in_this_frame[point_idx] = true;
+                        
+                        // 递增此点的颜色计数
+                        point_color_count[point_idx]++;
+                        
+                        local_colored_count++;
+                    }
                 }
-                
-                // 给点云上色
-                cv::Vec3b color = undistorted_img.at<cv::Vec3b>(y, x);
-                
-                #pragma omp critical
-                {
-                    colored_cloud->points[point_idx].b = color[0];
-                    colored_cloud->points[point_idx].g = color[1];
-                    colored_cloud->points[point_idx].r = color[2];
-                    
-                    // 标记这个点在此帧中被着色
-                    colored_in_this_frame[point_idx] = true;
-                    
-                    // 递增此点的颜色计数
-                    point_color_count[point_idx]++;
-                }
-                
-                colored_count++;
             }
+            
+            // 更新全局计数（原子操作）
+            atomic_colored_count += local_colored_count;
         }
     }
     
-    // 仅当有点被着色时才保存深度可视化图像 - 减少I/O操作
+    // 获取最终着色点数
+    colored_count = atomic_colored_count.load();
+    
+    // 仅当有点被着色时才保存深度可视化图像
     if (colored_count > 0) {
         std::string depth_viz_dir = output_folder + "/depth_viz";
         if (!fs::exists(depth_viz_dir)) {
@@ -631,43 +711,7 @@ bool CalibProcessor::processImageFrame(double timestamp,
         return false;
     }
     
-    // 如果需要，缩放图像以加快处理速度
-    if (image_downscale_factor > 1.0) {
-        cv::Size new_size(static_cast<int>(img.cols / image_downscale_factor), 
-                          static_cast<int>(img.rows / image_downscale_factor));
-        cv::resize(img, img, new_size, 0, 0, cv::INTER_AREA);
-        
-        // 缩放相机矩阵以匹配缩小的图像
-        cv::Mat scaled_camera_matrix = camera_matrix_.clone();
-        scaled_camera_matrix.at<double>(0, 0) /= image_downscale_factor;
-        scaled_camera_matrix.at<double>(1, 1) /= image_downscale_factor;
-        scaled_camera_matrix.at<double>(0, 2) /= image_downscale_factor;
-        scaled_camera_matrix.at<double>(1, 2) /= image_downscale_factor;
-        
-        cv::Mat scaled_newcamera_matrix = newcamera_matrix_.clone();
-        scaled_newcamera_matrix.at<double>(0, 0) /= image_downscale_factor;
-        scaled_newcamera_matrix.at<double>(1, 1) /= image_downscale_factor;
-        scaled_newcamera_matrix.at<double>(0, 2) /= image_downscale_factor;
-        scaled_newcamera_matrix.at<double>(1, 2) /= image_downscale_factor;
-        
-        // 获取相机模型
-        const std::string& camera_model = config.cameraParams().camera_model;
-        
-        // 基于相机模型去除畸变
-        cv::Mat undistorted_img;
-        if (camera_model == "fisheye") {
-            cv::fisheye::undistortImage(img, undistorted_img, scaled_camera_matrix, dist_coeffs_, scaled_newcamera_matrix);
-        } else { // pinhole or default
-            cv::undistort(img, undistorted_img, scaled_camera_matrix, dist_coeffs_, scaled_newcamera_matrix);
-        }
-        
-        // 计算相机位姿
-        Eigen::Matrix4d camera_pose = lidar_pose * T_lidar_camera_update_.inverse();
-        
-        // 用深度感知方法给点云着色并跟踪哪些点被着色了
-        return colorizePointCloud(undistorted_img, camera_pose, cloud, colored_cloud, 
-                                point_color_count, output_folder, timestamp, colored_in_this_frame);
-    } else {
+   
         // 获取相机模型
         const std::string& camera_model = config.cameraParams().camera_model;
         
@@ -685,13 +729,14 @@ bool CalibProcessor::processImageFrame(double timestamp,
         // 用深度感知方法给点云着色并跟踪哪些点被着色了
         return colorizePointCloud(undistorted_img, camera_pose, cloud, colored_cloud, 
                                 point_color_count, output_folder, timestamp, colored_in_this_frame);
-    }
 }
 
 bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder, 
                                               const std::string& trajectory_file,
                                               const std::string& pcd_file,
-                                              const std::string& output_folder) {
+                                              const std::string& output_folder,
+                                              boost::shared_ptr<pcl::PointCloud<pcl::PointXYZRGB>>* output_cloud_ptr,
+                                              std::vector<int>** output_color_count_ptr) {
     // Get configuration parameters
     const Config& config = Config::getInstance();
     const int viz_frequency = config.outputParams().viz_frequency;
@@ -775,6 +820,15 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
     // 为每个点创建计数器
     std::vector<int> point_color_count(cloud->points.size(), 0);
     
+    // Provide access to the colored cloud and count for emergency save
+    if (output_cloud_ptr) {
+        *output_cloud_ptr = colored_cloud;
+    }
+    
+    if (output_color_count_ptr) {
+        *output_color_count_ptr = &point_color_count;
+    }
+    
     // Get all image files from directory
     std::vector<std::pair<double, std::string>> image_files;
     for (const auto& entry : fs::directory_iterator(image_folder)) {
@@ -792,7 +846,7 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
     
     // Sample images to improve processing speed
     std::vector<std::pair<double, std::string>> selected_images;
-    for (size_t i = 0; i < image_files.size(); i += img_sampling_step) {  // Use the already defined img_sampling_step
+    for (size_t i = 50; i < image_files.size(); i += img_sampling_step) {  // Use the already defined img_sampling_step
         selected_images.push_back(image_files[i]);
     }
     
@@ -850,6 +904,20 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
     std::cout << "Starting image processing..." << std::endl;
     
     for (const auto& img_data : selected_images) {
+        // Check if termination was requested
+        if (SignalHandler::getInstance().shouldTerminate()) {
+            std::cout << "\nTermination requested. Saving current progress..." << std::endl;
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto total_time = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time).count();
+            int minutes = static_cast<int>(total_time) / 60;
+            int seconds = static_cast<int>(total_time) % 60;
+            std::string progress_info = "Processed " + std::to_string(img_count + 1) + "/" + std::to_string(selected_images.size()) + " images";
+            saveVisualization(colored_cloud, point_color_count, output_folder, progress_info);
+            std::cout << "Preprocessing interrupted! Processed " << img_count << " images in "
+                    << minutes << " minutes and " << seconds << " seconds." << std::endl;
+            return true;  // Return true to indicate a clean termination
+        }
+        
         double timestamp = img_data.first;
         std::string img_path = img_data.second;
         
@@ -877,13 +945,15 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
         
         // 初始化此帧标记
         std::vector<bool> colored_in_this_frame(cloud->points.size(), false);
-        
+        auto beforeTime = std::chrono::steady_clock::now();
         // Process image frame for colorization with tracking of colored points
         if (!processImageFrame(timestamp, img_path, lidar_pose, cloud, colored_cloud, point_color_count, output_folder, colored_in_this_frame)) {
             std::cerr << "Failed to process image frame: " << img_path << std::endl;
             continue;
         }
-        
+        auto afterTime = std::chrono::steady_clock::now();
+        double duration_second = std::chrono::duration<double>(afterTime - beforeTime).count();
+	    std::cout <<"color: " << duration_second << "s" << std::endl;
         // Calculate camera pose for visualization
         Eigen::Matrix4d camera_pose = lidar_pose * T_lidar_camera_update_.inverse();
         
@@ -936,13 +1006,15 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
                       << "Elapsed: " << elapsed_minutes << "m " << elapsed_secs << "s "
                       << "ETA: " << eta_minutes << "m " << eta_secs << "s        " << std::flush;
         }
+
+        
         
         // 仅在指定频率保存可视化，减少I/O操作
-        if (img_count % viz_frequency == 0 || img_count == selected_images.size() - 1) {
-            std::string progress_info = "Processed " + std::to_string(img_count + 1) + "/" + 
-                                      std::to_string(selected_images.size()) + " images";
-            saveVisualization(colored_cloud, point_color_count, output_folder, progress_info);
-        }
+        // if (img_count % viz_frequency == 0 || img_count == selected_images.size() - 1) {
+        //     std::string progress_info = "Processed " + std::to_string(img_count + 1) + "/" + 
+        //                               std::to_string(selected_images.size()) + " images";
+        //     saveVisualization(colored_cloud, point_color_count, output_folder, progress_info);
+        // }
         
         img_count++;
     }
@@ -962,11 +1034,20 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
                               " images out of " + std::to_string(selected_images.size());
     saveVisualization(colored_cloud, point_color_count, output_folder, progress_info);
     
+    // Clear the stored pointers as we're done
+    if (output_cloud_ptr) {
+        *output_cloud_ptr = nullptr;
+    }
+    
+    if (output_color_count_ptr) {
+        *output_color_count_ptr = nullptr;
+    }
+    
     // Generate and save additional outputs
     saveOptimizedCameraPoses(trajectory, output_folder);
     // No need to call saveOptimizedExtrinsics here as they have been saved incrementally
     // saveOptimizedExtrinsics(trajectory, output_folder);
-    createCameraTrajectoryVisualization(trajectory, output_folder);
+    //createCameraTrajectoryVisualization(trajectory, output_folder);
     
     return true;
 }
@@ -1061,6 +1142,19 @@ bool CalibProcessor::preprocess(const std::string& image_folder,
     auto start_time = std::chrono::high_resolution_clock::now();
     
     for (const auto& img_data : selected_images) {
+        // Check if termination was requested
+        if (SignalHandler::getInstance().shouldTerminate()) {
+            std::cout << "\nTermination requested. Saving current progress..." << std::endl;
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto total_time = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time).count();
+            int minutes = static_cast<int>(total_time) / 60;
+            int seconds = static_cast<int>(total_time) % 60;
+            
+            std::cout << "Preprocessing interrupted! Processed " << processed_count << " images in "
+                    << minutes << " minutes and " << seconds << " seconds." << std::endl;
+            return true;  // Return true to indicate a clean termination
+        }
+        
         double timestamp = img_data.first;
         std::string img_path = img_data.second;
         
@@ -1121,7 +1215,7 @@ bool CalibProcessor::preprocess(const std::string& image_folder,
         }
         
         cv::Mat resized_img;
-        cv::resize(undistorted_img, resized_img, cv::Size(800, 800), 0, 0, cv::INTER_LINEAR);
+        cv::resize(undistorted_img, resized_img, cv::Size(resizecamera_matrix_.at<float>(0,2)*2,resizecamera_matrix_.at<float>(1,2)*2), 0, 0, cv::INTER_LINEAR);
         std::string undist_dir = output_folder + "/undist_img";
         if (!fs::exists(undist_dir)) {
             fs::create_directories(undist_dir);
@@ -1346,8 +1440,36 @@ bool CalibProcessor::run() {
     std::cout << "Point cloud file: " << pcd_file_ << std::endl;
     std::cout << "Output folder: " << output_folder_ << std::endl;
     
+    // Initialize signal handler to enable clean termination on Ctrl+C
+    boost::shared_ptr<pcl::PointCloud<pcl::PointXYZRGB>> output_cloud = nullptr;
+    std::vector<int>* output_color_count = nullptr;
+    
+    SignalHandler::getInstance().init([&]() {
+        // Cleanup function that will be called on termination
+        // if (output_cloud && output_color_count) {
+        //     std::cout << "Saving colored point cloud before terminating..." << std::endl;
+        //     std::string colormap_dir = output_folder_ + "/colormap";
+        //     if (!fs::exists(colormap_dir)) {
+        //         fs::create_directories(colormap_dir);
+        //     }
+        //     std::string emergency_save_path = colormap_dir + "/colored_pointcloud_emergency_save.pcd";
+            
+        //     // Create a version with only colored points for the emergency save
+        //     pcl::PointCloud<pcl::PointXYZRGB>::Ptr save_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
+        //     for (size_t i = 0; i < output_cloud->points.size(); ++i) {
+        //         if ((*output_color_count)[i] > 0) {
+        //             save_cloud->push_back(output_cloud->points[i]);
+        //         }
+        //     }
+            
+        //     pcl::io::savePCDFileBinary(emergency_save_path, *save_cloud);
+        //     std::cout << "Emergency save completed to: " << emergency_save_path << std::endl;
+        // }
+        return true;
+    });
+    
     // Run the main processing
-    return processImagesAndPointCloud(image_folder_, trajectory_file_, pcd_file_, output_folder_);
+    return processImagesAndPointCloud(image_folder_, trajectory_file_, pcd_file_, output_folder_, &output_cloud, &output_color_count);
 }
 
 bool CalibProcessor::runPreprocessing() {
@@ -1378,6 +1500,9 @@ bool CalibProcessor::runPreprocessing() {
     std::cout << "Trajectory file: " << trajectory_file_ << std::endl;
     std::cout << "Point cloud file: " << pcd_file_ << std::endl;
     std::cout << "Output folder: " << output_folder_ << std::endl;
+    
+    // Initialize signal handler to enable clean termination on Ctrl+C
+    SignalHandler::getInstance().init();
     
     // Run preprocessing
     return preprocess(image_folder_, trajectory_file_, pcd_file_, output_folder_);

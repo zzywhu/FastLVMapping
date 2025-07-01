@@ -472,7 +472,7 @@ bool CalibProcessor::colorizePointCloud(const cv::Mat& undistorted_img,
     // 优化步骤4：批量构建深度缓冲区，减少锁竞争
     // 创建一个临时存储，用于后续处理
     struct PointProjInfo {
-        int original_idx;
+        int original_idx; 
         int px, py;
         float depth;
     };
@@ -748,6 +748,9 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
         return false;
     }
     
+    // Create a timer for the entire process
+    auto total_start_time = std::chrono::high_resolution_clock::now();
+    
     try {
         if (!fs::exists(output_folder)) {
             if (!fs::create_directories(output_folder)) {
@@ -759,6 +762,9 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
         std::cerr << "Filesystem error: " << e.what() << std::endl;
         return false;
     }
+    
+    // Time tracking for trajectory loading
+    auto traj_load_start = std::chrono::high_resolution_clock::now();
     
     // Load trajectory data
     std::vector<std::pair<double, Eigen::Matrix4d>> trajectory;
@@ -787,6 +793,10 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
     // Sort trajectory by timestamp
     std::sort(trajectory.begin(), trajectory.end(), compareTimestamps);
     
+    auto traj_load_end = std::chrono::high_resolution_clock::now();
+    auto traj_load_time = std::chrono::duration_cast<std::chrono::milliseconds>(traj_load_end - traj_load_start).count();
+    std::cout << "Trajectory loaded with " << trajectory.size() << " poses in " << traj_load_time / 1000.0 << " seconds." << std::endl;
+    
     // 优化读取点云过程 - 使用带进度显示的点云加载
     std::cout << "Loading point cloud from: " << pcd_file << " (this may take a while)..." << std::endl;
     auto cloud_load_start = std::chrono::high_resolution_clock::now();
@@ -798,6 +808,9 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
     auto cloud_load_end = std::chrono::high_resolution_clock::now();
     auto cloud_load_time = std::chrono::duration_cast<std::chrono::seconds>(cloud_load_end - cloud_load_start).count();
     std::cout << "Point cloud loaded with " << cloud->size() << " points in " << cloud_load_time << " seconds." << std::endl;
+    
+    // Time tracking for cloud initialization
+    auto cloud_init_start = std::chrono::high_resolution_clock::now();
     
     // 创建着色点云
     std::cout << "Initializing colored point cloud..." << std::endl;
@@ -817,6 +830,10 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
         colored_cloud->points[i].b = 0;
     }
     
+    auto cloud_init_end = std::chrono::high_resolution_clock::now();
+    auto cloud_init_time = std::chrono::duration_cast<std::chrono::milliseconds>(cloud_init_end - cloud_init_start).count();
+    std::cout << "Colored point cloud initialized in " << cloud_init_time / 1000.0 << " seconds." << std::endl;
+    
     // 为每个点创建计数器
     std::vector<int> point_color_count(cloud->points.size(), 0);
     
@@ -828,6 +845,9 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
     if (output_color_count_ptr) {
         *output_color_count_ptr = &point_color_count;
     }
+    
+    // Time tracking for image file scanning
+    auto img_scan_start = std::chrono::high_resolution_clock::now();
     
     // Get all image files from directory
     std::vector<std::pair<double, std::string>> image_files;
@@ -844,6 +864,10 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
     std::sort(image_files.begin(), image_files.end(), 
               [](const auto& a, const auto& b) { return a.first < b.first; });
     
+    auto img_scan_end = std::chrono::high_resolution_clock::now();
+    auto img_scan_time = std::chrono::duration_cast<std::chrono::milliseconds>(img_scan_end - img_scan_start).count();
+    std::cout << "Found and sorted " << image_files.size() << " images in " << img_scan_time / 1000.0 << " seconds." << std::endl;
+    
     // Sample images to improve processing speed
     std::vector<std::pair<double, std::string>> selected_images;
     for (size_t i = 50; i < image_files.size(); i += img_sampling_step) {  // Use the already defined img_sampling_step
@@ -852,6 +876,9 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
     
     std::cout << "Selected " << selected_images.size() << " images out of " << image_files.size() 
               << " for processing (sampling every " << img_sampling_step << " images)" << std::endl;
+    
+    // Time tracking for match/index file scanning
+    auto match_scan_start = std::chrono::high_resolution_clock::now();
     
     // Get match and index file folders
     std::string match_folder = output_folder + "/match/coordinates";
@@ -884,8 +911,10 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
         }
     }
     
+    auto match_scan_end = std::chrono::high_resolution_clock::now();
+    auto match_scan_time = std::chrono::duration_cast<std::chrono::milliseconds>(match_scan_end - match_scan_start).count();
     std::cout << "Found " << match_files.size() << " match files and " 
-              << index_files.size() << " index files" << std::endl;
+              << index_files.size() << " index files in " << match_scan_time / 1000.0 << " seconds." << std::endl;
     
     // Flag to track if extrinsics were updated
     bool extrinsics_updated = false;
@@ -902,6 +931,15 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
     // 添加进度显示和预计时间
     auto start_time = std::chrono::high_resolution_clock::now();
     std::cout << "Starting image processing..." << std::endl;
+    
+    // Statistics tracking
+    double total_colorize_time = 0.0;
+    double total_update_extrinsics_time = 0.0;
+    double total_ros_pub_time = 0.0;
+    double total_interpolate_time = 0.0;
+    int colorize_count = 0;
+    int extrinsics_update_count = 0;
+    int ros_pub_count = 0;
     
     for (const auto& img_data : selected_images) {
         // Check if termination was requested
@@ -925,37 +963,62 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
         current_timestamp_ = timestamp;
         output_folder_ = output_folder;
         
+        // Time interpolation operation
+        auto interp_start = std::chrono::high_resolution_clock::now();
+        
         // Interpolate LiDAR pose at this timestamp
         Eigen::Matrix4d lidar_pose;
         if (!interpolatePose(timestamp, trajectory, lidar_pose)) {
             continue;
         }
         
+        auto interp_end = std::chrono::high_resolution_clock::now();
+        double interp_time = std::chrono::duration<double>(interp_end - interp_start).count();
+        total_interpolate_time += interp_time;
+        
         // Check if there are matching files for calibration update
         if (match_files.find(timestamp) != match_files.end() && 
             index_files.find(timestamp) != index_files.end()) {
             
+            auto update_start = std::chrono::high_resolution_clock::now();
+            
             if (updateExtrinsics(match_files[timestamp], index_files[timestamp], lidar_pose, cloud)) {
                 // Extrinsics are now saved immediately after successful update
                 // No need to do anything here
+                extrinsics_update_count++;
             } else {
                 continue;
             }
+            
+            auto update_end = std::chrono::high_resolution_clock::now();
+            double update_time = std::chrono::duration<double>(update_end - update_start).count();
+            total_update_extrinsics_time += update_time;
+            std::cout << "Extrinsics update time: " << update_time << "s" << std::endl;
         }
         
         // 初始化此帧标记
         std::vector<bool> colored_in_this_frame(cloud->points.size(), false);
-        auto beforeTime = std::chrono::steady_clock::now();
+        
+        // Time colorization operation
+        auto color_start = std::chrono::steady_clock::now();
+        
         // Process image frame for colorization with tracking of colored points
         if (!processImageFrame(timestamp, img_path, lidar_pose, cloud, colored_cloud, point_color_count, output_folder, colored_in_this_frame)) {
             std::cerr << "Failed to process image frame: " << img_path << std::endl;
             continue;
         }
-        auto afterTime = std::chrono::steady_clock::now();
-        double duration_second = std::chrono::duration<double>(afterTime - beforeTime).count();
-	    std::cout <<"color: " << duration_second << "s" << std::endl;
+        
+        auto color_end = std::chrono::steady_clock::now();
+        double color_time = std::chrono::duration<double>(color_end - color_start).count();
+        total_colorize_time += color_time;
+        colorize_count++;
+        std::cout <<"Colorization time: " << color_time << "s" << std::endl;
+        
         // Calculate camera pose for visualization
         Eigen::Matrix4d camera_pose = lidar_pose * T_lidar_camera_update_.inverse();
+        
+        // Time ROS publishing operations
+        auto ros_start = std::chrono::steady_clock::now();
         
         // Publish to ROS topics if ROS is initialized
         if (ros_initialized_) {
@@ -981,6 +1044,13 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
             // 给ROS一些时间处理
             publish_rate.sleep();
             ros::spinOnce();
+            ros_pub_count++;
+        }
+        
+        auto ros_end = std::chrono::steady_clock::now();
+        if (ros_initialized_) {
+            double ros_time = std::chrono::duration<double>(ros_end - ros_start).count();
+            total_ros_pub_time += ros_time;
         }
         
         // 显示更精细的进度信息
@@ -1007,8 +1077,6 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
                       << "ETA: " << eta_minutes << "m " << eta_secs << "s        " << std::flush;
         }
 
-        
-        
         // 仅在指定频率保存可视化，减少I/O操作
         // if (img_count % viz_frequency == 0 || img_count == selected_images.size() - 1) {
         //     std::string progress_info = "Processed " + std::to_string(img_count + 1) + "/" + 
@@ -1027,7 +1095,38 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
     int total_minutes = static_cast<int>(total_seconds) / 60;
     int remaining_seconds = static_cast<int>(total_seconds) % 60;
     
+    // Output detailed timing statistics
+    std::cout << "\n===== Detailed Timing Statistics =====" << std::endl;
     std::cout << "Processing completed in " << total_minutes << " minutes and " << remaining_seconds << " seconds." << std::endl;
+    
+    // Calculate averages for operations that occurred multiple times
+    double avg_colorize_time = colorize_count > 0 ? total_colorize_time / colorize_count : 0;
+    double avg_update_time = extrinsics_update_count > 0 ? total_update_extrinsics_time / extrinsics_update_count : 0;
+    double avg_ros_time = ros_pub_count > 0 ? total_ros_pub_time / ros_pub_count : 0;
+    
+    std::cout << "File loading times:" << std::endl;
+    std::cout << "  - Trajectory loading: " << traj_load_time / 1000.0 << " seconds" << std::endl;
+    std::cout << "  - Point cloud loading: " << cloud_load_time << " seconds" << std::endl;
+    std::cout << "  - Image/Match file scanning: " << img_scan_time / 1000.0 << " seconds" << std::endl;
+    std::cout << "Processing times:" << std::endl;
+    std::cout << "  - Total pose interpolation: " << total_interpolate_time << " seconds" << std::endl;
+    std::cout << "  - Total colorization: " << total_colorize_time << " seconds (" << avg_colorize_time << "s avg)" << std::endl;
+    std::cout << "  - Total extrinsics updates: " << total_update_extrinsics_time << " seconds (" << avg_update_time << "s avg)" << std::endl;
+    if (ros_initialized_) {
+        std::cout << "  - Total ROS publishing: " << total_ros_pub_time << " seconds (" << avg_ros_time << "s avg)" << std::endl;
+    }
+    
+    // Calculate percentage breakdown of time
+    auto total_runtime = std::chrono::duration_cast<std::chrono::seconds>(end_time - total_start_time).count();
+    std::cout << "Time distribution:" << std::endl;
+    std::cout << "  - Colorization: " << (total_colorize_time / total_runtime * 100.0) << "%" << std::endl;
+    std::cout << "  - Extrinsics updates: " << (total_update_extrinsics_time / total_runtime * 100.0) << "%" << std::endl;
+    if (ros_initialized_) {
+        std::cout << "  - ROS publishing: " << (total_ros_pub_time / total_runtime * 100.0) << "%" << std::endl;
+    }
+    std::cout << "  - Other operations: " << ((total_runtime - total_colorize_time - total_update_extrinsics_time - 
+                                           (ros_initialized_ ? total_ros_pub_time : 0)) / total_runtime * 100.0) << "%" << std::endl;
+    std::cout << "=====================================" << std::endl;
     
     // Final save and report
     std::string progress_info = "Processing complete. Processed " + std::to_string(img_count) + 
@@ -1210,7 +1309,8 @@ bool CalibProcessor::preprocess(const std::string& image_folder,
         cv::Mat undistorted_img;
         if (camera_model == "fisheye") {
             cv::fisheye::undistortImage(img, undistorted_img, camera_matrix_, dist_coeffs_, newcamera_matrix_);
-        } else { // pinhole or default
+        } 
+        if(camera_model=="pinhole") { // pinhole or default
             cv::undistort(img, undistorted_img, camera_matrix_, dist_coeffs_, newcamera_matrix_);
         }
         

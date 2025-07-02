@@ -47,7 +47,13 @@ int main(int argc, char** argv)
     
     // Default configuration file path
     std::string config_file;
-    nh.param<std::string>("config_file", config_file, "/home/zzy/SensorCalibration/EasyColor/src/FastLVMapping/config/default_config.yaml");
+    if (!nh.getParam("config_file", config_file)) {
+        // 如果参数未设置，使用默认值
+        config_file = "/home/zzy/SensorCalibration/EasyColor/src/FastLVMapping/config/default_config.yaml";
+        ROS_WARN("No config_file parameter provided, using default: %s", config_file.c_str());
+    } else {
+        ROS_INFO("Using configuration file: %s", config_file.c_str());
+    }
     
     ROS_INFO("Using configuration file: %s", config_file.c_str());
     

@@ -10,20 +10,19 @@
  */
 int main(int argc, char** argv)
 {
-    // Initialize ROS properly to avoid the "You must call ros::init() before creating the first NodeHandle" error
+    // 初始化ROS
     ros::init(argc, argv, "fast_lv_preprocess", ros::init_options::AnonymousName);
-    ros::NodeHandle nh;
+    ros::NodeHandle nh("~"); // 使用私有命名空间，这很重要！
     
-    // Get the config file path from command line arguments
+    // 获取配置文件路径
     std::string config_file;
-    if (argc > 1) {
-        config_file = argv[1];
+    if (!nh.getParam("config_file", config_file)) {
+        // 如果参数未设置，使用默认值
+        config_file = "/home/zzy/SensorCalibration/EasyColor/src/FastLVMapping/config/default_config.yaml";
+        ROS_WARN("No config_file parameter provided, using default: %s", config_file.c_str());
     } else {
-        // Use default config file
-        config_file = "/home/zzy/SensorCalibration/EasyColor/src/FastLVMapping/config/Kitti.yaml";
+        ROS_INFO("Using configuration file: %s", config_file.c_str());
     }
-    
-    std::cout << "Using configuration file: " << config_file << std::endl;
     
     // Create processor without a ROS node handle to avoid publishing
     lvmapping::CalibProcessor processor;

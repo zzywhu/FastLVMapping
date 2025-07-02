@@ -872,7 +872,7 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
     
     // Sample images to improve processing speed
     std::vector<std::pair<double, std::string>> selected_images;
-    for (size_t i = 50; i < image_files.size(); i += img_sampling_step) {  // Use the already defined img_sampling_step
+    for (size_t i = 0; i < image_files.size(); i += img_sampling_step) {  // Use the already defined img_sampling_step
         selected_images.push_back(image_files[i]);
     }
     
@@ -977,7 +977,6 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
         auto interp_end = std::chrono::high_resolution_clock::now();
         double interp_time = std::chrono::duration<double>(interp_end - interp_start).count();
         total_interpolate_time += interp_time;
-        
         // Check if there are matching files for calibration update
         if (match_files.find(timestamp) != match_files.end() && 
             index_files.find(timestamp) != index_files.end()) {

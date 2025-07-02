@@ -1,6 +1,6 @@
 <launch>
   <!-- Parameters -->
-  <arg name="config_file" default="$(find fast_lv_mapping)/config/default_config.yaml" />
+  <arg name="config_file" default="$(find fast_lv_mapping)/config/Kitti.yaml" />
   <arg name="preprocessing" default="false" doc="Run in preprocessing mode if true"/>
   
   <!-- Launch the main node -->

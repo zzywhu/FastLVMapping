@@ -56,8 +56,8 @@ projection_params:
 
 # PnP parameters
 pnp_params:
-   max_rotation_diff: 0.5     # Maximum allowed rotation difference
-   max_translation_diff: 0.5  # Maximum allowed translation difference
+   max_rotation_diff: 2     # Maximum allowed rotation difference
+   max_translation_diff: 2  # Maximum allowed translation difference
    reprojection_error: 8.0    # Reprojection error threshold for RANSAC
    min_inlier_count: 10       # Minimum number of inliers required
    ransac_iterations: 100     # Number of RANSAC iterations

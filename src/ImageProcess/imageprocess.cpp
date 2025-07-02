@@ -3,6 +3,7 @@
 #include <limits>
 #include <opencv2/opencv.hpp>
 #include <Eigen/Dense>
+#include <thread> 
 
 // ImageProcess implementation
 ImageProcess::ImageProcess() : img_width(0), img_height(0), fx(0), fy(0), cx(0), cy(0) {
@@ -219,95 +220,104 @@ std::pair<cv::Mat, cv::Mat> ImageProcess::projectPinholeWithIndices(const pcl::P
     const float cx = static_cast<float>(resize_matrix_.at<float>(0,2));
     const float cy = static_cast<float>(resize_matrix_.at<float>(1,2));
     
-    // Create intensity image, initialized to 0
-    cv::Mat intensityImage = cv::Mat::zeros(IMG_HEIGHT, IMG_WIDTH, CV_32F);
-    
-    // Create index map, initialized to -1 (indicating no corresponding point cloud point)
-    cv::Mat indexMap = cv::Mat(IMG_HEIGHT, IMG_WIDTH, CV_32S, cv::Scalar(-1));
-    
     // If point cloud is empty, return empty image
     if(cloud->size() == 0) {
         cv::Mat emptyImage = cv::Mat::zeros(IMG_HEIGHT, IMG_WIDTH, CV_8U);
-        return {emptyImage, indexMap};
+        cv::Mat emptyIndexMap = cv::Mat(IMG_HEIGHT, IMG_WIDTH, CV_32S, cv::Scalar(-1));
+        return {emptyImage, emptyIndexMap};
     }
+
+    // Pre-allocate matrices with correct sizes
+    cv::Mat intensityImage = cv::Mat::zeros(IMG_HEIGHT, IMG_WIDTH, CV_32F);
+    cv::Mat indexMap = cv::Mat(IMG_HEIGHT, IMG_WIDTH, CV_32S, cv::Scalar(-1));
+    cv::Mat depthMap = cv::Mat(IMG_HEIGHT, IMG_WIDTH, CV_32F, cv::Scalar(std::numeric_limits<float>::max()));
+
+    // Split the point cloud into chunks for parallel processing
+    const size_t nPoints = cloud->size();
+    const size_t nThreads = std::thread::hardware_concurrency();
+    const size_t chunkSize = (nPoints + nThreads - 1) / nThreads;
     
-    // Create depth map for handling occlusions
-    cv::Mat depthMap = cv::Mat::zeros(IMG_HEIGHT, IMG_WIDTH, CV_32F);
-    depthMap.setTo(std::numeric_limits<float>::max());  // Initialize to maximum value
-    
-    // Project point cloud onto image plane
-    for (size_t i = 0; i < cloud->points.size(); ++i) {
-        const auto& p = cloud->points[i];
+    // Create thread-local matrices to avoid race conditions
+    std::vector<cv::Mat> localIntensityImages(nThreads, cv::Mat::zeros(IMG_HEIGHT, IMG_WIDTH, CV_32F));
+    std::vector<cv::Mat> localDepthMaps(nThreads, cv::Mat(IMG_HEIGHT, IMG_WIDTH, CV_32F, cv::Scalar(std::numeric_limits<float>::max())));
+    std::vector<cv::Mat> localIndexMaps(nThreads, cv::Mat(IMG_HEIGHT, IMG_WIDTH, CV_32S, cv::Scalar(-1)));
+
+    #pragma omp parallel num_threads(nThreads)
+    {
+        const int threadId = omp_get_thread_num();
+        const size_t startIdx = threadId * chunkSize;
+        const size_t endIdx = std::min(startIdx + chunkSize, nPoints);
         
-        // Only process points in front of the camera
-        if(p.z < 0) {
-            continue;
-        }
+        // Get references to this thread's local matrices
+        cv::Mat& localIntensity = localIntensityImages[threadId];
+        cv::Mat& localDepth = localDepthMaps[threadId];
+        cv::Mat& localIndex = localIndexMaps[threadId];
         
-        // Calculate projected point coordinates
-        float x = p.x;
-        float y = p.y;
-        float z = p.z;
-        
-        // Pinhole projection
-        float depth = z;  // Depth value is the z-axis distance
-        
-        // Skip if depth is 0 or negative
-        if(depth <= 0) {
-            continue;
-        }
-        
-        // Calculate pixel coordinates
-        float u = (fx * x / z) + cx;
-        float v = (fy * y / z) + cy;
-        
-        // Check if pixel coordinates are within image bounds
-        if (u >= 0 && u < IMG_WIDTH && v >= 0 && v < IMG_HEIGHT) {
-            // Force convert to integer coordinates
-            int ui = static_cast<int>(u);
-            int vi = static_cast<int>(v);
+        // Process points assigned to this thread
+        for (size_t i = startIdx; i < endIdx; ++i) {
+            const auto& p = cloud->points[i];
             
-            // Handle occlusions (closer points override further points)
-            if (depth < depthMap.at<float>(vi, ui)) {
-                depthMap.at<float>(vi, ui) = depth;
-                intensityImage.at<float>(vi, ui) = p.intensity;
-                indexMap.at<int>(vi, ui) = static_cast<int>(i); // Record point cloud index
+            if (p.z <= 0) continue;  // Skip points behind camera
+            
+            // Calculate pixel coordinates
+            float u = (fx * p.x / p.z) + cx;
+            float v = (fy * p.y / p.z) + cy;
+            
+            // Check if within image bounds
+            if (u >= 0 && u < IMG_WIDTH && v >= 0 && v < IMG_HEIGHT) {
+                int ui = static_cast<int>(u);
+                int vi = static_cast<int>(v);
+                
+                // Handle occlusions
+                if (p.z < localDepth.at<float>(vi, ui)) {
+                    localDepth.at<float>(vi, ui) = p.z;
+                    localIntensity.at<float>(vi, ui) = p.intensity;
+                    localIndex.at<int>(vi, ui) = static_cast<int>(i);
+                }
             }
         }
     }
     
-    // 归一化到 [0, 255]
+    // Merge thread-local results
+    for (size_t t = 0; t < nThreads; ++t) {
+        for (int y = 0; y < IMG_HEIGHT; ++y) {
+            for (int x = 0; x < IMG_WIDTH; ++x) {
+                if (localDepthMaps[t].at<float>(y, x) < depthMap.at<float>(y, x)) {
+                    depthMap.at<float>(y, x) = localDepthMaps[t].at<float>(y, x);
+                    intensityImage.at<float>(y, x) = localIntensityImages[t].at<float>(y, x);
+                    indexMap.at<int>(y, x) = localIndexMaps[t].at<int>(y, x);
+                }
+            }
+        }
+    }
+    
+    // Image post-processing
     double minVal, maxVal;
     cv::minMaxLoc(intensityImage, &minVal, &maxVal);
     
     cv::Mat normalizedImage;
-    // 避免除以零
-    if(maxVal > minVal) {
+    if (maxVal > minVal) {
         intensityImage.convertTo(normalizedImage, CV_8U, 255.0 / (maxVal - minVal), -minVal * 255.0 / (maxVal - minVal));
     } else {
         intensityImage.convertTo(normalizedImage, CV_8U);
     }
     
-    // 直方图均衡化
+    // Apply image enhancements using OpenCV's optimized functions
     cv::equalizeHist(normalizedImage, normalizedImage);
     
-    // 伽马校正增强对比度
+    // Gamma correction
     cv::Mat gammaImage;
-    normalizedImage.convertTo(gammaImage, CV_32F, 1.0 / 255.0);
-    cv::pow(gammaImage, 0.5, gammaImage);  // γ = 0.5
+    normalizedImage.convertTo(gammaImage, CV_32F, 1.0/255.0);
+    cv::pow(gammaImage, 0.5, gammaImage);
     gammaImage.convertTo(normalizedImage, CV_8U, 255);
     
-    // 将灰度图转换为彩色图像
-    cv::Mat colorImage;
-    cv::cvtColor(normalizedImage, colorImage, cv::COLOR_GRAY2BGR);
-    
+    // Create final image
     cv::Mat finalImage;
-    if(isinter) {
-        // 注意：fillHoles需要相应的修改来处理彩色图像
+    if (isinter) {
         cv::Mat filledGray = fillHoles(normalizedImage, 1);
         cv::cvtColor(filledGray, finalImage, cv::COLOR_GRAY2BGR);
     } else {
-        finalImage = colorImage;
+        cv::cvtColor(normalizedImage, finalImage, cv::COLOR_GRAY2BGR);
     }
     
     return {finalImage, indexMap};

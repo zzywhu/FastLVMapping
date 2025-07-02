@@ -20,7 +20,7 @@ int main(int argc, char** argv)
         config_file = argv[1];
     } else {
         // Use default config file
-        config_file = "/home/zzy/SensorCalibration/EasyColor/src/FastLVMapping/config/Kitti.yaml";
+        config_file = "/home/zzy/SensorCalibration/EasyColor/src/FastLVMapping/config/default_config.yaml";
     }
     
     std::cout << "Using configuration file: " << config_file << std::endl;

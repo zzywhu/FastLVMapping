@@ -11,12 +11,11 @@
 #include <chrono>
 #include <iomanip>
 #include <filesystem>
+#include <thread>
 #include <pcl/kdtree/kdtree_flann.h>
 #include <nav_msgs/Path.h>
 #include <std_msgs/ColorRGBA.h>
 #include <pcl_conversions/pcl_conversions.h>  // Add this for toRosMsg
-#include <thread>  // Add this for std::thread
-#include <atomic>  // Add this for std::atomic
 
 namespace fs = std::filesystem;
 namespace lvmapping {
@@ -800,7 +799,7 @@ bool CalibProcessor::processImagesAndPointCloud(const std::string& image_folder,
     auto traj_load_time = std::chrono::duration_cast<std::chrono::milliseconds>(traj_load_end - traj_load_start).count();
     std::cout << "Trajectory loaded with " << trajectory.size() << " poses in " << traj_load_time / 1000.0 << " seconds." << std::endl;
     
-    // Load point cloud
+    // 优化读取点云过程 - 使用带进度显示的点云加载
     std::cout << "Loading point cloud from: " << pcd_file << " (this may take a while)..." << std::endl;
     auto cloud_load_start = std::chrono::high_resolution_clock::now();
     pcl::PointCloud<pcl::PointXYZI>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZI>);
@@ -1175,16 +1174,24 @@ bool CalibProcessor::preprocess(const std::string& image_folder,
         return false;
     }
     
-    // Create required subdirectories in advance to avoid race conditions
-    std::vector<std::string> subdirs = {"undist_img", "rimg", "index_maps"};
-    for (const auto& dir : subdirs) {
-        std::string path = output_folder + "/" + dir;
-        if (!fs::exists(path)) {
-            fs::create_directories(path);
-        }
+    // Create required subdirectories all at once
+    std::string undist_dir = output_folder + "/undist_img";
+    std::string rimg_dir = output_folder + "/rimg";
+    std::string index_dir = output_folder + "/index_maps";
+    
+    try {
+        if (!fs::exists(undist_dir)) fs::create_directories(undist_dir);
+        if (!fs::exists(rimg_dir)) fs::create_directories(rimg_dir);
+        if (!fs::exists(index_dir)) fs::create_directories(index_dir);
+    } catch (const fs::filesystem_error& e) {
+        std::cerr << "Failed to create subdirectories: " << e.what() << std::endl;
+        return false;
     }
     
     // Load trajectory data
+    auto load_start = std::chrono::high_resolution_clock::now();
+    std::cout << "Loading trajectory data..." << std::endl;
+    
     std::vector<std::pair<double, Eigen::Matrix4d>> trajectory;
     std::ifstream traj_file(trajectory_file);
     if (!traj_file.is_open()) {
@@ -1208,36 +1215,52 @@ bool CalibProcessor::preprocess(const std::string& image_folder,
         
         trajectory.push_back({time, pose});
     }
+    
     // Sort trajectory by timestamp
     std::sort(trajectory.begin(), trajectory.end(), compareTimestamps);
-    std::cout << "Loaded " << trajectory.size() << " trajectory poses" << std::endl;
+    
+    auto traj_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::high_resolution_clock::now() - load_start).count();
+    std::cout << "Loaded " << trajectory.size() << " trajectory points in " << traj_time / 1000.0 << "s" << std::endl;
     
     // Load point cloud
-    std::cout << "Loading point cloud from: " << pcd_file << " (this may take a while)..." << std::endl;
-    auto cloud_load_start = std::chrono::high_resolution_clock::now();
+    std::cout << "Loading point cloud..." << std::endl;
+    auto cloud_start = std::chrono::high_resolution_clock::now();
+    
     pcl::PointCloud<pcl::PointXYZI>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZI>);
     if (pcl::io::loadPCDFile<pcl::PointXYZI>(pcd_file, *cloud) == -1) {
         std::cerr << "Failed to load point cloud: " << pcd_file << std::endl;
         return false;
     }
-    auto cloud_load_end = std::chrono::high_resolution_clock::now();
-    auto cloud_load_time = std::chrono::duration_cast<std::chrono::seconds>(cloud_load_end - cloud_load_start).count();
-    std::cout << "Point cloud loaded with " << cloud->size() << " points in " << cloud_load_time << " seconds." << std::endl;
+    
+    auto cloud_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::high_resolution_clock::now() - cloud_start).count();
+    std::cout << "Loaded point cloud with " << cloud->size() << " points in " << cloud_time / 1000.0 << "s" << std::endl;
     
     // Get all image files from directory
+    auto img_scan_start = std::chrono::high_resolution_clock::now();
     std::vector<std::pair<double, std::string>> image_files;
+    
     for (const auto& entry : fs::directory_iterator(image_folder)) {
         if (entry.is_regular_file()) {
             std::string filename = entry.path().filename().string();
             // Assuming filename is the timestamp
-            double timestamp = std::stod(filename.substr(0, filename.find_last_of('.')));
-            image_files.push_back({timestamp, entry.path().string()});
+            try {
+                double timestamp = std::stod(filename.substr(0, filename.find_last_of('.')));
+                image_files.push_back({timestamp, entry.path().string()});
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Could not parse timestamp from filename: " << filename << std::endl;
+            }
         }
     }
     
     // Sort images by timestamp
     std::sort(image_files.begin(), image_files.end(), 
               [](const auto& a, const auto& b) { return a.first < b.first; });
+    
+    auto img_scan_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::high_resolution_clock::now() - img_scan_start).count();
+    std::cout << "Found and sorted " << image_files.size() << " images in " << img_scan_time / 1000.0 << "s" << std::endl;
     
     // Use sampling step from configuration
     const Config& config = Config::getInstance();
@@ -1252,278 +1275,193 @@ bool CalibProcessor::preprocess(const std::string& image_folder,
     std::cout << "Selected " << selected_images.size() << " images out of " << image_files.size() 
               << " for processing (sampling every " << sampling_step << " images)" << std::endl;
     
-    // Create a thread-safe counter for progress tracking
+    // Setup for parallel processing
+    const size_t num_threads = std::thread::hardware_concurrency();
     std::atomic<int> processed_count(0);
+    std::atomic<bool> should_terminate(false);
     
-    // Create a progress display thread
-    std::atomic<bool> progress_running(true);
-    auto progress_start_time = std::chrono::high_resolution_clock::now();
+    // Use a mutex for cout operations to avoid garbled output
+    std::mutex cout_mutex;
     
-    // Launch progress display thread
-    std::thread progress_thread([&]() {
-        int last_count = 0;
-        while (progress_running) {
-            std::this_thread::sleep_for(std::chrono::seconds(2));  // Update every 2 seconds
+    // Process images in parallel
+    auto start_time = std::chrono::high_resolution_clock::now();
+    
+     // 创建线程池
+    std::vector<std::thread> threads;
+    std::vector<bool> thread_finished(num_threads, false);  // 添加这行来跟踪线程完成状态
+    
+    // 确定每个线程的批处理大小
+    size_t batch_size = (selected_images.size() + num_threads - 1) / num_threads;
+    
+    // Launch threads
+    for (size_t t = 0; t < num_threads; ++t) {
+        threads.emplace_back([&, t]() {
+            // Determine range for this thread
+            size_t start_idx = t * batch_size;
+            size_t end_idx = std::min(start_idx + batch_size, selected_images.size());
             
-            int current_count = processed_count.load();
-            auto current_time = std::chrono::high_resolution_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(current_time - progress_start_time).count();
+            // Thread-local ImageProcess object for each thread
+            ImageProcess imgProc;
             
-            if (elapsed > 0 && current_count > 10) {
-                // Calculate progress percentage
-                double progress = 100.0 * current_count / selected_images.size();
+            // Process each image assigned to this thread
+            for (size_t i = start_idx; i < end_idx; ++i) {
+                // Check if we should terminate
+                if (should_terminate || SignalHandler::getInstance().shouldTerminate()) {
+                    should_terminate = true;
+                    return;
+                }
                 
-                // Calculate speed and remaining time
-                double images_per_second = static_cast<double>(current_count) / elapsed;
-                double remaining_seconds = (selected_images.size() - current_count) / images_per_second;
+                const auto& img_data = selected_images[i];
+                double timestamp = img_data.first;
+                std::string img_path = img_data.second;
                 
-                int minutes = static_cast<int>(remaining_seconds) / 60;
-                int seconds = static_cast<int>(remaining_seconds) % 60;
+                // Load image
+                cv::Mat img = cv::imread(img_path);
+                if (img.empty()) {
+                    std::lock_guard<std::mutex> lock(cout_mutex);
+                    std::cerr << "Failed to load image: " << img_path << std::endl;
+                    continue;
+                }
                 
-                // Only print if count changed
-                if (current_count > last_count) {
-                    std::cout << "Preprocessing progress: " << current_count << "/" << selected_images.size()
-                              << " (" << std::fixed << std::setprecision(1) << progress << "%)" << std::endl;
-                    std::cout << "Processing speed: " << std::fixed << std::setprecision(2) 
-                              << images_per_second << " images/sec" << std::endl;
-                    std::cout << "Estimated time remaining: " << minutes << " minutes " 
-                              << seconds << " seconds" << std::endl;
+                // Find camera pose at this timestamp by interpolation
+                Eigen::Matrix4d lidar_pose = Eigen::Matrix4d::Identity();
+                if (timestamp <= trajectory.front().first || timestamp >= trajectory.back().first) {
+                    continue;
+                }
+                
+                // Find the trajectory points that surround the image timestamp
+                size_t idx = 0;
+                while (idx < trajectory.size() - 1 && trajectory[idx + 1].first < timestamp) {
+                    idx++;
+                }
+                
+                // Interpolate the pose
+                double t1 = trajectory[idx].first;
+                double t2 = trajectory[idx + 1].first;
+                Eigen::Matrix4d pose1 = trajectory[idx].second;
+                Eigen::Matrix4d pose2 = trajectory[idx + 1].second;
+                
+                double alpha = (timestamp - t1) / (t2 - t1);
+                
+                // Position interpolation
+                Eigen::Vector3d pos1 = pose1.block<3, 1>(0, 3);
+                Eigen::Vector3d pos2 = pose2.block<3, 1>(0, 3);
+                Eigen::Vector3d pos = pos1 + alpha * (pos2 - pos1);
+                
+                // Rotation interpolation
+                Eigen::Quaterniond q1(pose1.block<3, 3>(0, 0));
+                Eigen::Quaterniond q2(pose2.block<3, 3>(0, 0));
+                Eigen::Quaterniond q = q1.slerp(alpha, q2);
+                
+                lidar_pose.block<3, 3>(0, 0) = q.toRotationMatrix();
+                lidar_pose.block<3, 1>(0, 3) = pos;
+                
+                // Calculate camera pose from LiDAR pose
+                Eigen::Matrix4d camera_pose = lidar_pose * T_lidar_camera_.inverse();
+                
+                // Get the camera model from configuration
+                const std::string& camera_model = Config::getInstance().cameraParams().camera_model;
+                
+                // Undistort the image based on camera model
+                cv::Mat undistorted_img;
+                if (camera_model == "fisheye") {
+                    cv::fisheye::undistortImage(img, undistorted_img, camera_matrix_, dist_coeffs_, newcamera_matrix_);
+                } else { // pinhole or default
+                    cv::undistort(img, undistorted_img, camera_matrix_, dist_coeffs_, newcamera_matrix_);
+                }
+                
+                cv::Mat resized_img;
+                cv::resize(undistorted_img, resized_img, 
+                          cv::Size(resizecamera_matrix_.at<float>(0,2)*2, resizecamera_matrix_.at<float>(1,2)*2), 
+                          0, 0, cv::INTER_LINEAR);
+                
+                std::string undist_img_path = undist_dir + "/" + std::to_string(timestamp) + ".png";
+                cv::imwrite(undist_img_path, resized_img);  // Save undistorted image
+                
+                // Transform point cloud - more efficient approach
+                pcl::PointCloud<pcl::PointXYZI>::Ptr transformed_cloud(new pcl::PointCloud<pcl::PointXYZI>);
+                transformed_cloud->reserve(cloud->size());
+                
+                Eigen::Matrix4d cam_inv_transform = camera_pose.inverse();
+                
+                // Pre-filter points - only transform points likely to be visible
+                for (const auto& point : cloud->points) {
+                    Eigen::Vector4d pt_world(point.x, point.y, point.z, 1.0);
+                    Eigen::Vector4d pt_camera = cam_inv_transform * pt_world;
                     
-                    last_count = current_count;
-                }
-            }
-        }
-    });
-    
-    // Process each selected image in parallel
-    #pragma omp parallel for schedule(dynamic) if(OPENMP_FOUND)
-    for (size_t i = 0; i < selected_images.size(); i++) {
-        // Check if termination was requested
-        if (SignalHandler::getInstance().shouldTerminate()) {
-            continue;  // Skip this iteration, the main thread will handle termination
-        }
-        
-        double timestamp = selected_images[i].first;
-        std::string img_path = selected_images[i].second;
-        
-        // Local variables for this thread
-        Eigen::Matrix4d lidar_pose = Eigen::Matrix4d::Identity();
-        Eigen::Matrix4d camera_pose;
-        
-        // Find camera pose at this timestamp by interpolation
-        if (timestamp <= trajectory.front().first) {
-            // Skip this image - timestamp before trajectory start
-            continue;
-        } else if (timestamp >= trajectory.back().first) {
-            // Skip this image - timestamp after trajectory end
-            continue;
-        } else {
-            // Find the trajectory points that surround the image timestamp
-            size_t idx = 0;
-            while (idx < trajectory.size() - 1 && trajectory[idx + 1].first < timestamp) {
-                idx++;
-            }
-            
-            // Interpolate the pose
-            double t1 = trajectory[idx].first;
-            double t2 = trajectory[idx + 1].first;
-            Eigen::Matrix4d pose1 = trajectory[idx].second;
-            Eigen::Matrix4d pose2 = trajectory[idx + 1].second;
-            
-            double alpha = (timestamp - t1) / (t2 - t1);
-            
-            // Position interpolation
-            Eigen::Vector3d pos1 = pose1.block<3, 1>(0, 3);
-            Eigen::Vector3d pos2 = pose2.block<3, 1>(0, 3);
-            Eigen::Vector3d pos = pos1 + alpha * (pos2 - pos1);
-            
-            // Rotation interpolation
-            Eigen::Quaterniond q1(pose1.block<3, 3>(0, 0));
-            Eigen::Quaterniond q2(pose2.block<3, 3>(0, 0));
-            Eigen::Quaterniond q = q1.slerp(alpha, q2);
-            
-            lidar_pose.block<3, 3>(0, 0) = q.toRotationMatrix();
-            lidar_pose.block<3, 1>(0, 3) = pos;
-        }
-        
-        // Calculate camera pose from LiDAR pose
-        camera_pose = lidar_pose * T_lidar_camera_.inverse();
-        
-        // Load image
-        cv::Mat img = cv::imread(img_path);
-        if (img.empty()) {
-            std::cerr << "Failed to load image: " << img_path << std::endl;
-            continue;
-        }
-        
-        // Get the camera model from configuration
-        const std::string& camera_model = Config::getInstance().cameraParams().camera_model;
-        
-        // Undistort the image based on camera model
-        cv::Mat undistorted_img;
-        if (camera_model == "fisheye") {
-            cv::fisheye::undistortImage(img, undistorted_img, camera_matrix_, dist_coeffs_, newcamera_matrix_);
-        } 
-        else if (camera_model == "pinhole") { // pinhole or default
-            cv::undistort(img, undistorted_img, camera_matrix_, dist_coeffs_, newcamera_matrix_);
-        }
-        else {
-            std::cerr << "Unknown camera model: " << camera_model << std::endl;
-            continue;
-        }
-        
-        cv::Mat resized_img;
-        cv::resize(undistorted_img, resized_img, cv::Size(resizecamera_matrix_.at<float>(0,2)*2,resizecamera_matrix_.at<float>(1,2)*2), 0, 0, cv::INTER_LINEAR);
-        
-        // Generate paths for output files
-        std::string undist_img_path = output_folder + "/undist_img/" + std::to_string(timestamp) + ".png";
-        std::string projected_img_path = output_folder + "/rimg/" + std::to_string(timestamp) + ".png";
-        std::string index_map_path = output_folder + "/index_maps/" + std::to_string(timestamp) + "_index.png";
-        std::string vis_index_path = output_folder + "/index_maps/" + std::to_string(timestamp) + "_index_vis.png";
-        std::string binary_index_path = output_folder + "/index_maps/" + std::to_string(timestamp) + "_index.bin";
-        
-        // Save undistorted image - using OpenCV's thread-safe imwrite
-        cv::imwrite(undist_img_path, resized_img);
-        
-        // Free undistorted image memory as it's no longer needed
-        img.release();
-        undistorted_img.release();
-
-        // Generate and save the projected image for visualization
-        // MEMORY OPTIMIZATION: Process point cloud in batches to reduce memory usage
-        const size_t BATCH_SIZE = 5000000; // 5 million points per batch
-        const size_t total_points = cloud->points.size();
-        const size_t num_batches = (total_points + BATCH_SIZE - 1) / BATCH_SIZE;
-        
-        pcl::PointCloud<pcl::PointXYZI>::Ptr transformed_cloud(new pcl::PointCloud<pcl::PointXYZI>());
-        transformed_cloud->reserve(total_points);
-
-        for (size_t batch = 0; batch < num_batches; ++batch) {
-            size_t start_idx = batch * BATCH_SIZE;
-            size_t end_idx = std::min(start_idx + BATCH_SIZE, total_points);
-            
-            // Process this batch of points
-            for (size_t j = start_idx; j < end_idx; ++j) {
-                const auto& point = cloud->points[j];
-                
-                // Only transform points that are likely to be visible (rough culling)
-                // First transform to camera space
-                Eigen::Vector4d pt_world(point.x, point.y, point.z, 1.0);
-                Eigen::Vector4d pt_camera = camera_pose.inverse() * pt_world;
-                
-                // Skip points behind camera or too far away (basic frustum culling)
-                if (pt_camera[2] <= 0 || pt_camera[2] > 150.0) {
-                    continue;
+                    // Only add points in front of camera and within reasonable distance
+                    if (pt_camera[2] > 0) {
+                        pcl::PointXYZI transformed_point;
+                        transformed_point.x = pt_camera[0];
+                        transformed_point.y = pt_camera[1];
+                        transformed_point.z = pt_camera[2];
+                        transformed_point.intensity = point.intensity;
+                        transformed_cloud->push_back(transformed_point);
+                    }
                 }
                 
-                // Simple field-of-view check
-                double x_over_z = std::abs(pt_camera[0] / pt_camera[2]);
-                double y_over_z = std::abs(pt_camera[1] / pt_camera[2]);
-                if (x_over_z > 1.5 || y_over_z > 1.5) {  // Rough FOV check (adjust values as needed)
-                    continue;
+                // Project the point cloud to the image plane for visualization and get index mapping
+                auto result = imgProc.projectPinholeWithIndices(transformed_cloud, true);
+                cv::Mat projected_image = result.first;
+                cv::Mat index_map = result.second;
+                
+                // Save projected image
+                std::string projected_img_path = rimg_dir + "/" + std::to_string(timestamp) + ".png";
+                cv::imwrite(projected_img_path, projected_image);
+                
+                // Process index map efficiently
+                // Find max index for visualization
+                int max_index = 0;
+                #pragma omp parallel for reduction(max:max_index)
+                for (int y = 0; y < index_map.rows; y++) {
+                    for (int x = 0; x < index_map.cols; x++) {
+                        int idx = index_map.at<int>(y, x);
+                        if (idx > max_index) max_index = idx;
+                    }
                 }
                 
-                // Add point to transformed cloud
-                pcl::PointXYZI transformed_point;
-                transformed_point.x = pt_camera[0];
-                transformed_point.y = pt_camera[1];
-                transformed_point.z = pt_camera[2];
-                transformed_point.intensity = point.intensity;
-                transformed_point.intensity = j; // Store original index in intensity
+                // Prepare both index maps at once to reduce loops
+                cv::Mat index_image(index_map.size(), CV_16UC3);
+                cv::Mat vis_index_map(index_map.size(), CV_8UC3, cv::Scalar(0, 0, 0));
                 
-                transformed_cloud->push_back(transformed_point);
-            }
-        }
-        
-        // Create ImageProcess object
-        ImageProcess imgProc;
-
-        try {
-            // Project the point cloud to the image plane for visualization and get index mapping
-            auto result = imgProc.projectPinholeWithIndices(transformed_cloud, true);
-            cv::Mat projected_image = result.first;
-            cv::Mat index_map = result.second;
-            
-            // Save the projected image
-            cv::imwrite(projected_img_path, projected_image);
-            
-            // Free projected image memory
-            projected_image.release();
-            
-            // Find max index for normalization (for viewing purposes)
-            int max_index = 0;
-            for (int y = 0; y < index_map.rows; y++) {
-                for (int x = 0; x < index_map.cols; x++) {
-                    int idx = index_map.at<int>(y, x);
-                    if (idx > max_index) max_index = idx;
-                }
-            }
-            
-            // Convert index map to a visualization-friendly format
-            cv::Mat index_image(index_map.size(), CV_16UC3);
-            
-            // Convert each index to color components that can encode the full index value
-            for (int y = 0; y < index_map.rows; y++) {
-                for (int x = 0; x < index_map.cols; x++) {
-                    int idx = index_map.at<int>(y, x);
-                    if (idx >= 0) {  // Valid point index
-                        // Get the original point index from intensity value
-                        if (idx < transformed_cloud->size()) {
-                            int original_idx = static_cast<int>(transformed_cloud->points[idx].intensity);
+                #pragma omp parallel for
+                for (int y = 0; y < index_map.rows; y++) {
+                    for (int x = 0; x < index_map.cols; x++) {
+                        int idx = index_map.at<int>(y, x);
+                        if (idx >= 0) {  // Valid point index
+                            // Encode index for storage
+                            index_image.at<cv::Vec3w>(y, x)[0] = idx & 0xFFFF;
+                            index_image.at<cv::Vec3w>(y, x)[1] = (idx >> 16) & 0xFFFF;
+                            index_image.at<cv::Vec3w>(y, x)[2] = 0;
                             
-                            // Encode the index as 3 16-bit channels
-                            index_image.at<cv::Vec3w>(y, x)[0] = original_idx & 0xFFFF;          // Lower 16 bits
-                            index_image.at<cv::Vec3w>(y, x)[1] = (original_idx >> 16) & 0xFFFF;  // Middle 16 bits
-                            index_image.at<cv::Vec3w>(y, x)[2] = 0;                              // Upper bits (unused)
+                            // Create visualization color
+                            float normalized_idx = static_cast<float>(idx) / max_index;
+                            int hue = static_cast<int>(normalized_idx * 180);
+                            
+                            // Convert HSV to RGB for visualization (fully saturated, full value)
+                            cv::Mat hsv(1, 1, CV_8UC3, cv::Scalar(hue, 255, 255));
+                            cv::Mat rgb;
+                            cv::cvtColor(hsv, rgb, cv::COLOR_HSV2BGR);
+                            
+                            vis_index_map.at<cv::Vec3b>(y, x) = rgb.at<cv::Vec3b>(0, 0);
                         } else {
+                            // No point maps to this pixel
                             index_image.at<cv::Vec3w>(y, x) = cv::Vec3w(0, 0, 0);
                         }
-                    } else {
-                        // No point maps to this pixel
-                        index_image.at<cv::Vec3w>(y, x) = cv::Vec3w(0, 0, 0);
                     }
                 }
-            }
-            
-            // Save the raw index image
-            cv::imwrite(index_map_path, index_image);
-            
-            // Also create a visualization image for easier debugging
-            cv::Mat vis_index_map(index_map.size(), CV_8UC3, cv::Scalar(0, 0, 0));
-            for (int y = 0; y < index_map.rows; y++) {
-                for (int x = 0; x < index_map.cols; x++) {
-                    int idx = index_map.at<int>(y, x);
-                    if (idx >= 0 && idx < transformed_cloud->size()) {  // Valid point index
-                        // Use the original point index for color
-                        int original_idx = static_cast<int>(transformed_cloud->points[idx].intensity);
-                        
-                        // Create a color based on the index (for visualization only)
-                        float normalized_idx = static_cast<float>(original_idx) / cloud->size();
-                        int hue = static_cast<int>(normalized_idx * 180);  // Hue ranges from 0 to 180 in OpenCV
-                        
-                        // Convert HSV to RGB for visualization (fully saturated, full value)
-                        cv::Mat hsv(1, 1, CV_8UC3, cv::Scalar(hue, 255, 255));
-                        cv::Mat rgb;
-                        cv::cvtColor(hsv, rgb, cv::COLOR_HSV2BGR);
-                        
-                        vis_index_map.at<cv::Vec3b>(y, x) = rgb.at<cv::Vec3b>(0, 0);
-                    }
-                }
-            }
-            
-            // Save the visualization image
-            cv::imwrite(vis_index_path, vis_index_map);
-            
-            // Free visualization image memory
-            index_image.release();
-            vis_index_map.release();
-            
-            // Also save the binary version for efficient loading
-            {
-                // Use a scope to ensure file is closed properly
+                
+                // Save all versions of the index map
+                std::string index_map_path = index_dir + "/" + std::to_string(timestamp) + "_index.png";
+                std::string vis_index_path = index_dir + "/" + std::to_string(timestamp) + "_index_vis.png";
+                std::string binary_index_path = index_dir + "/" + std::to_string(timestamp) + "_index.bin";
+                
+                cv::imwrite(index_map_path, index_image);
+                cv::imwrite(vis_index_path, vis_index_map);
+                
+                // Save binary version for efficient loading
                 std::ofstream index_file(binary_index_path, std::ios::binary);
                 if (index_file.is_open()) {
-                    // Write matrix dimensions
                     int rows = index_map.rows;
                     int cols = index_map.cols;
                     
@@ -1532,56 +1470,82 @@ bool CalibProcessor::preprocess(const std::string& image_folder,
                     index_file.write(reinterpret_cast<const char*>(index_map.data), rows * cols * sizeof(int));
                     index_file.close();
                 } else {
+                    std::lock_guard<std::mutex> lock(cout_mutex);
                     std::cerr << "Failed to save index map to: " << binary_index_path << std::endl;
                 }
+                
+                // Increment counter and show progress
+                int curr_count = ++processed_count;
+                if (curr_count % 10 == 0 || curr_count == selected_images.size()) {
+                    std::lock_guard<std::mutex> lock(cout_mutex);
+                    auto current_time = std::chrono::high_resolution_clock::now();
+                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(current_time - start_time).count();
+                    double progress = 100.0 * curr_count / selected_images.size();
+                    
+                    std::cout << "Preprocessing progress: " << curr_count << "/" << selected_images.size()
+                              << " (" << std::fixed << std::setprecision(1) << progress << "%)" << std::endl;
+                    
+                    if (elapsed > 0 && curr_count > 10) {
+                        double images_per_second = static_cast<double>(curr_count) / elapsed;
+                        double remaining_seconds = (selected_images.size() - curr_count) / images_per_second;
+                        
+                        int minutes = static_cast<int>(remaining_seconds) / 60;
+                        int seconds = static_cast<int>(remaining_seconds) % 60;
+                        
+                        std::cout << "Processing speed: " << std::fixed << std::setprecision(2) 
+                                  << images_per_second << " images/sec" << std::endl;
+                        std::cout << "Estimated time remaining: " << minutes << " minutes " 
+                                  << seconds << " seconds" << std::endl;
+                    }
+                }
             }
-            
-            // Free index map memory
-            index_map.release();
-            
-        } catch (const std::bad_alloc& e) {
-            std::cerr << "Memory allocation error while processing image " << img_path << ": " << e.what() << std::endl;
-            continue;  // Skip this image and continue with the next one
-        } catch (const std::exception& e) {
-            std::cerr << "Error while processing image " << img_path << ": " << e.what() << std::endl;
-            continue;
+            thread_finished[t] = true; 
+        });
+    }
+    
+    // 等待线程完成或处理终止请求
+    bool terminated = false;
+    while (true) {
+        if (SignalHandler::getInstance().shouldTerminate() && !should_terminate) {
+            should_terminate = true;
+            terminated = true;
+            std::cout << "\nTermination requested. Waiting for threads to finish..." << std::endl;
         }
         
-        // Clear transformed cloud to free memory
-        transformed_cloud->clear();
-        transformed_cloud.reset();
+        // 检查是否所有线程都已完成 - 修改此逻辑
+        bool all_done = true;
+        for (size_t t = 0; t < num_threads; ++t) {
+            if (!thread_finished[t]) {  // 使用线程完成标志而不是 joinable 检查
+                all_done = false;
+                break;
+            }
+        }
         
-        // Increment the atomic counter for processed images
-        processed_count++;
-    }
-    
-    // Stop the progress thread
-    progress_running = false;
-    if (progress_thread.joinable()) {
-        progress_thread.join();
-    }
-    
-    // Check if termination was requested
-    if (SignalHandler::getInstance().shouldTerminate()) {
-        std::cout << "\nTermination requested. Saving current progress..." << std::endl;
-        auto end_time = std::chrono::high_resolution_clock::now();
-        auto total_time = std::chrono::duration_cast<std::chrono::seconds>(end_time - progress_start_time).count();
-        int minutes = static_cast<int>(total_time) / 60;
-        int seconds = static_cast<int>(total_time) % 60;
+        if (all_done) break;
         
-        std::cout << "Preprocessing interrupted! Processed " << processed_count.load() << " images in "
-                << minutes << " minutes and " << seconds << " seconds." << std::endl;
-        return true;  // Return true to indicate a clean termination
+        // 稍微休眠以避免忙等待
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     
-    // Show final stats
+    // Join 所有线程
+    for (auto& thread : threads) {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+    
     auto end_time = std::chrono::high_resolution_clock::now();
-    auto total_time = std::chrono::duration_cast<std::chrono::seconds>(end_time - progress_start_time).count();
+    auto total_time = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time).count();
     int minutes = static_cast<int>(total_time) / 60;
     int seconds = static_cast<int>(total_time) % 60;
     
-    std::cout << "Preprocessing complete! Processed " << processed_count.load() << " images in "
-              << minutes << " minutes and " << seconds << " seconds." << std::endl;
+    if (terminated) {
+        std::cout << "\nPreprocessing interrupted! Processed " << processed_count << " images in "
+                  << minutes << " minutes and " << seconds << " seconds." << std::endl;
+    } else {
+        std::cout << "Preprocessing complete! Processed " << processed_count << " images in "
+                  << minutes << " minutes and " << seconds << " seconds." << std::endl;
+    }
     
     return true;
 }

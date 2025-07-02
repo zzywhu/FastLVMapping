@@ -1276,7 +1276,7 @@ bool CalibProcessor::preprocess(const std::string& image_folder,
               << " for processing (sampling every " << sampling_step << " images)" << std::endl;
     
     // Setup for parallel processing
-    const size_t num_threads = std::thread::hardware_concurrency();
+    const size_t num_threads = 4;
     std::atomic<int> processed_count(0);
     std::atomic<bool> should_terminate(false);
     

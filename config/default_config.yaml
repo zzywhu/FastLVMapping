@@ -31,10 +31,10 @@ extrinsics: !!opencv-matrix
   data: [-0.00297174, 0.99999, -0.00331239, 0.0642425, 0.00781543, -0.00328908, -0.999964, 0.281943, -0.999965, -0.00299752, -0.00780558, 0.0424095, 0, 0, 0, 1]
 
 # Data paths
-pcd_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/loop3/MapCloud.pcd
-img_path: /media/zzy/T7/SLAM_DATASET/Rot_LVI-SLAM/LOOP/loop3/3/2
-traj_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/loop3/traj.txt
-output_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/loop3/result
+pcd_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/whu_door/MapCloud.pcd
+img_path: /media/zzy/T7/SLAM_DATASET/Rot_LVI-SLAM/whu_door/door2/2
+traj_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/whu_door/traj.txt
+output_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/whu_door/result
 
 # Point cloud parameters - 点云参数
 point_cloud_params:

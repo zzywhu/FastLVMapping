@@ -1,5 +1,6 @@
 <launch>
   <!-- Config file path - can be overridden from command line -->
+  <!-- <arg name="config_file" default="$(find fast_lv_mapping)/config/default_config.yaml" /> -->
   <arg name="config_file" default="$(find fast_lv_mapping)/config/Kitti.yaml" />
   
   <!-- Launch the preprocessing node with proper ROS initialization -->

@@ -41,6 +41,10 @@ point_cloud_params:
    min_depth: 0.1          # 可视化的最小深度 (米)
    max_depth: 50.0         # 可视化的最大深度 (米)
    neighborhood_size: 2    # 深度检查的像素邻域大小
+   sky_invalid_ratio_threshold: 0.05  # 天空无效比例阈值
+   depth_discontinuity_threshold: 1 # 深度不连续阈值
+   gradient_kernel_size: 5  # 梯度计算核大小
+   sky_detection_kernel_size: 20 # 天空检测核大小
 
 # Projection parameters - 投影参数
 projection_params:
@@ -49,16 +53,16 @@ projection_params:
    focal_length: 1500      # 针孔投影的焦距
    image_center_x: 1500    # 针孔投影的图像中心X坐标
    image_center_y: 1500    # 针孔投影的图像中心Y坐标
-   valid_image_start_x: 500  # 图像有效区域起始X坐标
-   valid_image_start_y: 500  # 图像有效区域起始Y坐标
-   valid_image_end_x: 2500   # 图像有效区域结束X坐标
-   valid_image_end_y: 2500   # 图像有效区域结束Y坐标
+   valid_image_start_x: 200  # 图像有效区域起始X坐标
+   valid_image_start_y: 200  # 图像有效区域起始Y坐标
+   valid_image_end_x: 2800   # 图像有效区域结束X坐标
+   valid_image_end_y: 2800   # 图像有效区域结束Y坐标
 
 # PnP parameters - PnP参数
 pnp_params:
    max_rotation_diff: 0.5     # 允许的最大旋转差异
    max_translation_diff: 0.5  # 允许的最大平移差异
-   reprojection_error: 8.0    # RANSAC的重投影误差阈值
+   reprojection_error: 8.0    # RANSAC的重投影误ee差阈值
    min_inlier_count: 10       # 所需的最小内点数
    ransac_iterations: 100     # RANSAC迭代次数
    confidence: 0.99           # RANSAC置信度
@@ -73,6 +77,7 @@ processing_params:
    img_sampling_step: 2    # 图像采样步长 (例如，2表示每隔一张图像)
    image_downscale_factor: 1.0  # 图像缩放因子 (1.0表示不缩放，2.0表示缩小一半)
    preprocess_sampling_step: 2  # 预处理的采样步长 (每隔一张图像)
+   use_extrinsic_optimization: 1  # 是否使用外参优化 
 
 # Depth processing parameters - 深度处理参数
 depth_params:

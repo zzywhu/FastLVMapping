@@ -31,16 +31,20 @@ extrinsics: !!opencv-matrix
   data: [0.0371783278, 0.9992675562, 0.0090621821, -0.0570625187, -0.0986182135, -0.0053553387, 0.9951109327, 0.8021927491, 0.9944306009, -0.0378902567, 0.0983468786, -1.5023956175, 0, 0, 0, 1]
 
 # Data paths
-pcd_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/kitti360/MapCloud.pcd
-img_path: /media/zzy/T7/SLAM_DATASET/KITTI/KITTI-360/data_2d_raw/2013_05_28_drive_0000_sync/image_00/data_rgb
-traj_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/kitti360/traj.txt
-output_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/kitti360/result
+pcd_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/kitti360_t2/MapCloud.pcd
+img_path: /media/zzy/T7/SLAM_DATASET/KITTI/KITTI-360/data_2d_raw/2013_05_28_drive_0002_sync/image_00/data_rgb
+traj_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/kitti360_t2/traj.txt
+output_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/kitti360_t2/result
 
 # Point cloud parameters
 point_cloud_params:
    min_depth: 0.1          # Minimum depth for visualization (meters)
    max_depth: 50.0         # Maximum depth for visualization (meters)
    neighborhood_size: 3    # Size of pixel neighborhood for depth checking
+   sky_invalid_ratio_threshold: 0.1  # Sky invalid ratio threshold
+   depth_discontinuity_threshold: 1 # Depth discontinuity threshold
+   gradient_kernel_size: 5  # Gradient calculation kernel size
+   sky_detection_kernel_size: 5 # Sky detection kernel size
 
 # Projection parameters
 projection_params:
@@ -49,10 +53,10 @@ projection_params:
    focal_length: 780     # Focal length for pinhole projection
    image_center_x: 696    # Image center X for pinhole projection
    image_center_y: 256    # Image center Y for pinhole projection
-   valid_image_start_x: 200  # Start X of valid region in the image
+   valid_image_start_x: 100  # Start X of valid region in the image
    valid_image_start_y: 50  # Start Y of valid region in the image
-   valid_image_end_x: 1000   # End X of valid region in the image
-   valid_image_end_y: 250   # End Y of valid region in the image
+   valid_image_end_x: 1300  # End X of valid region in the image
+   valid_image_end_y: 480   # End Y of valid region in the image
 
 # PnP parameters
 pnp_params:
@@ -72,6 +76,7 @@ output_params:
 processing_params:
    img_sampling_step: 3    # Step size for image sampling (e.g., 2 means every other image)
    preprocess_sampling_step: 3  # Step size for preprocessing (every other image)
+   use_extrinsic_optimization: true 
 
 # Depth processing parameters
 depth_params:

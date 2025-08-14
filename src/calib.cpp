@@ -432,11 +432,14 @@ bool CalibProcessor::colorizePointCloud(
     // 新增：创建深度梯度检测缓冲区
     cv::Mat depth_gradient_buffer(depth_viz_img.size(), CV_32F, cv::Scalar(0.0f));
 
-    // 优化步骤1：预分配空间以减少锁竞争
+    // 优化步骤1：预分配空间并预过滤已着色的点
     std::vector<pcl::PointXYZI> filtered_points;
     std::vector<int> filtered_indices;
     filtered_points.reserve(cloud->size() / 4);
     filtered_indices.reserve(cloud->size() / 4);
+
+    // 统计跳过的已着色点数量
+    std::atomic<int> skipped_colored_points(0);
 
     // 优化步骤2：使用更大的块大小，让每个线程处理更多连续的点
     const size_t block_size = 4096;
@@ -450,9 +453,18 @@ bool CalibProcessor::colorizePointCloud(
         local_filtered_points.reserve(block_size);
         local_filtered_indices.reserve(block_size);
 
-// 第一阶段：视锥体过滤
+        int local_skipped_count = 0;
+
+// 第一阶段：视锥体过滤和已着色点过滤
 #pragma omp for schedule(dynamic, block_size)
         for (size_t i = 0; i < cloud->points.size(); i++) {
+            // **新增：检查点是否已经被着色过**
+            if (point_color_count[i] > 0) {
+                // 如果点已经被着色过，跳过处理
+                local_skipped_count++;
+                continue;
+            }
+
             Eigen::Vector4d pt_world(cloud->points[i].x, cloud->points[i].y,
                                      cloud->points[i].z, 1.0);
             Eigen::Vector4d pt_camera = world_to_camera * pt_world;
@@ -473,6 +485,9 @@ bool CalibProcessor::colorizePointCloud(
             }
         }
 
+        // 更新跳过的点数统计
+        skipped_colored_points += local_skipped_count;
+
 // 合并本地结果到全局容器
 #pragma omp critical
         {
@@ -483,6 +498,11 @@ bool CalibProcessor::colorizePointCloud(
                                     local_filtered_indices.begin(),
                                     local_filtered_indices.end());
         }
+    }
+
+    // 打印跳过的已着色点统计信息
+    if (skipped_colored_points > 0) {
+        std::cout << "Skipped " << skipped_colored_points << " already colored points in frustum filtering" << std::endl;
     }
 
     // 优化步骤4：批量构建深度缓冲区，减少锁竞争
@@ -557,10 +577,11 @@ bool CalibProcessor::colorizePointCloud(
         }
     }
 
-    const float depth_discontinuity_threshold = pc_params.depth_discontinuity_threshold; // 深度不连续阈值（米）
-    const int gradient_kernel_size = pc_params.gradient_kernel_size;                     // 梯度计算核大小
-    const int sky_detection_kernel_size = pc_params.sky_detection_kernel_size;           // 天空检测核大小
-    const float sky_invalid_ratio_threshold = pc_params.sky_invalid_ratio_threshold;     // 无效深度比例阈值
+    // [深度梯度计算代码保持不变...]
+    const float depth_discontinuity_threshold = pc_params.depth_discontinuity_threshold;
+    const int gradient_kernel_size = pc_params.gradient_kernel_size;
+    const int sky_detection_kernel_size = pc_params.sky_detection_kernel_size;
+    const float sky_invalid_ratio_threshold = pc_params.sky_invalid_ratio_threshold;
 
 #pragma omp parallel for collapse(2) if (OPENMP_FOUND)
     for (int y = std::max(gradient_kernel_size, sky_detection_kernel_size);
@@ -569,25 +590,21 @@ bool CalibProcessor::colorizePointCloud(
              x < depth_buffer.cols - std::max(gradient_kernel_size, sky_detection_kernel_size); x++) {
             float center_depth = depth_buffer.at<float>(y, x);
 
-            // 如果中心像素没有有效深度，跳过
             if (center_depth == std::numeric_limits<float>::max()) {
                 continue;
             }
 
-            // 1. 计算周围的深度梯度（原有逻辑）
             float max_gradient = 0.0f;
 
-            // 检查3x3邻域内的深度变化
             for (int dy = -1; dy <= 1; dy++) {
                 for (int dx = -1; dx <= 1; dx++) {
-                    if (dx == 0 && dy == 0) continue; // 跳过中心点
+                    if (dx == 0 && dy == 0) continue;
 
                     int neighbor_x = x + dx;
                     int neighbor_y = y + dy;
 
                     float neighbor_depth = depth_buffer.at<float>(neighbor_y, neighbor_x);
 
-                    // 如果邻居有有效深度，计算梯度
                     if (neighbor_depth != std::numeric_limits<float>::max()) {
                         float gradient = std::abs(center_depth - neighbor_depth);
                         max_gradient = std::max(max_gradient, gradient);
@@ -595,14 +612,12 @@ bool CalibProcessor::colorizePointCloud(
                 }
             }
 
-            // 2. 新增：检测天空或背景区域（周围大量无效深度）
             int total_neighbors = 0;
             int invalid_neighbors = 0;
 
-            // 在更大的邻域内检查无效深度的比例
             for (int dy = -sky_detection_kernel_size; dy <= sky_detection_kernel_size; dy++) {
                 for (int dx = -sky_detection_kernel_size; dx <= sky_detection_kernel_size; dx++) {
-                    if (dx == 0 && dy == 0) continue; // 跳过中心点
+                    if (dx == 0 && dy == 0) continue;
 
                     int neighbor_x = x + dx;
                     int neighbor_y = y + dy;
@@ -616,14 +631,11 @@ bool CalibProcessor::colorizePointCloud(
                 }
             }
 
-            // 计算无效深度比例
             float invalid_ratio = static_cast<float>(invalid_neighbors) / total_neighbors;
 
-            // 3. 新增：检测深度跳跃（前景到背景的突变）
             bool has_depth_jump = false;
-            const float depth_jump_threshold = 2.0f; // 深度跳跃阈值（米）
+            const float depth_jump_threshold = 2.0f;
 
-            // 检查是否存在从近距离到远距离的跳跃
             for (int dy = -1; dy <= 1; dy++) {
                 for (int dx = -1; dx <= 1; dx++) {
                     if (dx == 0 && dy == 0) continue;
@@ -634,7 +646,6 @@ bool CalibProcessor::colorizePointCloud(
                     float neighbor_depth = depth_buffer.at<float>(neighbor_y, neighbor_x);
 
                     if (neighbor_depth != std::numeric_limits<float>::max()) {
-                        // 如果邻居深度远大于中心深度，可能是前景到背景的跳跃
                         if (neighbor_depth - center_depth > depth_jump_threshold) {
                             has_depth_jump = true;
                             break;
@@ -644,15 +655,12 @@ bool CalibProcessor::colorizePointCloud(
                 if (has_depth_jump) break;
             }
 
-            // 综合判断：设置梯度值
             float final_gradient = max_gradient;
 
-            // 如果周围无效深度比例过高，认为是天空边缘
             if (invalid_ratio > sky_invalid_ratio_threshold) {
                 final_gradient = std::max(final_gradient, depth_discontinuity_threshold * 1.5f);
             }
 
-            // 如果存在深度跳跃，增加梯度值
             if (has_depth_jump) {
                 final_gradient = std::max(final_gradient, depth_discontinuity_threshold * 1.2f);
             }
@@ -664,6 +672,7 @@ bool CalibProcessor::colorizePointCloud(
     // 第二阶段：给点云着色并创建可视化（增加深度不连续检测）
     int colored_count = 0;
     std::atomic<int> atomic_colored_count(0);
+    std::atomic<int> atomic_skipped_already_colored(0);
 
 // 优化步骤6：使用图像块并行处理
 #pragma omp parallel for collapse(2) schedule(dynamic) if (OPENMP_FOUND)
@@ -671,39 +680,36 @@ bool CalibProcessor::colorizePointCloud(
         for (int bx = 0; bx < num_blocks_x; bx++) {
             int start_x = proj_params.valid_image_start_x + bx * block_width;
             int start_y = proj_params.valid_image_start_y + by * block_height;
-            int end_x =
-                std::min(start_x + block_width, proj_params.valid_image_end_x);
-            int end_y =
-                std::min(start_y + block_height, proj_params.valid_image_end_y);
+            int end_x = std::min(start_x + block_width, proj_params.valid_image_end_x);
+            int end_y = std::min(start_y + block_height, proj_params.valid_image_end_y);
 
-            // 块内局部计数器
             int local_colored_count = 0;
+            int local_skipped_count = 0;
 
-            // 对块内每个像素处理
             for (int y = start_y; y < end_y; y++) {
                 for (int x = start_x; x < end_x; x++) {
                     int point_idx = point_index_buffer.at<int>(y, x);
                     if (point_idx >= 0) {
-                        // 获取深度值
+                        // **新增：再次检查点是否已经被着色过**
+                        if (point_color_count[point_idx] > 0) {
+                            local_skipped_count++;
+                            continue;
+                        }
+
                         float depth = depth_buffer.at<float>(y, x);
 
-                        // 新增：检查深度不连续性
                         float depth_gradient = 0.0f;
                         if (y >= gradient_kernel_size && y < depth_gradient_buffer.rows - gradient_kernel_size && x >= gradient_kernel_size && x < depth_gradient_buffer.cols - gradient_kernel_size) {
                             depth_gradient = depth_gradient_buffer.at<float>(y, x);
                         }
 
-                        // 如果深度梯度超过阈值，跳过此点的着色（认为是边缘不连续区域）
                         if (depth_gradient > depth_discontinuity_threshold) {
-                            // 在深度可视化中标记为红色（可选，用于调试）
-                            depth_viz_img.at<cv::Vec3b>(y, x) =
-                                cv::Vec3b(0, 0, 255); // 红色标记不连续区域
-                            continue;                 // 跳过着色
+                            depth_viz_img.at<cv::Vec3b>(y, x) = cv::Vec3b(0, 0, 255);
+                            continue;
                         }
 
                         // 创建深度可视化
-                        float normalized_depth =
-                            (depth - pc_params.min_depth) / (pc_params.max_depth - pc_params.min_depth);
+                        float normalized_depth = (depth - pc_params.min_depth) / (pc_params.max_depth - pc_params.min_depth);
                         normalized_depth = std::min(std::max(normalized_depth, 0.0f), 1.0f);
 
                         int r = static_cast<int>((1.0f - normalized_depth) * 255);
@@ -715,49 +721,59 @@ bool CalibProcessor::colorizePointCloud(
                         // 给点云上色
                         cv::Vec3b color = undistorted_img.at<cv::Vec3b>(y, x);
 
-                        // 更新点云颜色
-                        colored_cloud->points[point_idx].b = color[0];
-                        colored_cloud->points[point_idx].g = color[1];
-                        colored_cloud->points[point_idx].r = color[2];
+                        // **修改：使用原子操作确保线程安全的着色**
+                        int expected_count = 0;
+                        if (std::atomic_compare_exchange_strong(
+                                reinterpret_cast<std::atomic<int> *>(&point_color_count[point_idx]),
+                                &expected_count, 1)) {
+                            // 成功设置颜色计数，现在进行着色
+                            colored_cloud->points[point_idx].b = color[0];
+                            colored_cloud->points[point_idx].g = color[1];
+                            colored_cloud->points[point_idx].r = color[2];
 
-                        // 标记这个点在此帧中被着色
-                        colored_in_this_frame[point_idx] = true;
+                            // 标记这个点在此帧中被着色
+                            colored_in_this_frame[point_idx] = true;
 
-                        // 递增此点的颜色计数
-                        point_color_count[point_idx]++;
-
-                        local_colored_count++;
+                            local_colored_count++;
+                        } else {
+                            // 点已经被其他线程着色了
+                            local_skipped_count++;
+                        }
                     }
                 }
             }
 
-            // 更新全局计数（原子操作）
             atomic_colored_count += local_colored_count;
+            atomic_skipped_already_colored += local_skipped_count;
         }
     }
 
-    // 获取最终着色点数
     colored_count = atomic_colored_count.load();
+    int total_skipped = atomic_skipped_already_colored.load();
 
-    // 仅当有点被着色时才保存深度可视化图像
+    // 打印详细统计信息
+    if (total_skipped > 0 || skipped_colored_points > 0) {
+        std::cout << "Frame " << timestamp << ": Colored " << colored_count
+                  << " new points, skipped " << (total_skipped + skipped_colored_points.load())
+                  << " already colored points (frustum: " << skipped_colored_points.load()
+                  << ", pixel-level: " << total_skipped << ")" << std::endl;
+    }
+
+    // [保存可视化代码保持不变...]
     if (colored_count > 0) {
         std::string depth_viz_dir = output_folder + "/depth_viz";
         if (!fs::exists(depth_viz_dir)) {
             fs::create_directories(depth_viz_dir);
         }
 
-        std::string depth_viz_path =
-            depth_viz_dir + "/" + std::to_string(timestamp) + "_depth.png";
+        std::string depth_viz_path = depth_viz_dir + "/" + std::to_string(timestamp) + "_depth.png";
         cv::imwrite(depth_viz_path, depth_viz_img);
 
-        // 新增：保存深度梯度可视化图像（用于调试）
         cv::Mat gradient_viz_img;
-        cv::normalize(depth_gradient_buffer, gradient_viz_img, 0, 255,
-                      cv::NORM_MINMAX, CV_8UC1);
+        cv::normalize(depth_gradient_buffer, gradient_viz_img, 0, 255, cv::NORM_MINMAX, CV_8UC1);
         cv::applyColorMap(gradient_viz_img, gradient_viz_img, cv::COLORMAP_JET);
 
-        std::string gradient_viz_path =
-            depth_viz_dir + "/" + std::to_string(timestamp) + "_gradient.png";
+        std::string gradient_viz_path = depth_viz_dir + "/" + std::to_string(timestamp) + "_gradient.png";
         cv::imwrite(gradient_viz_path, gradient_viz_img);
     }
 
@@ -1543,7 +1559,7 @@ bool CalibProcessor::preprocess(const std::string &image_folder,
               << sampling_step << " images)" << std::endl;
 
     // 设置线程数为4
-    const size_t num_threads = 4;
+    const size_t num_threads = 8;
     std::cout << "Using " << num_threads << " threads for parallel processing"
               << std::endl;
 
@@ -2369,10 +2385,10 @@ void CalibProcessor::publishCameraPose(const Eigen::Matrix4d &camera_pose,
     frustum_marker.lifetime = ros::Duration(0); // 0 means forever
 
     // Define frustum size - make the camera model larger
-    double near_plane = 0;  // Increased from 0.05
-    double far_plane = 3;   // Increased from 0.3
-    double fov_width = 1.5; // Increased from 0.15
-    double fov_height = 1;  // Increased from 0.10
+    double near_plane = 0;   // Increased from 0.05
+    double far_plane = 2;    // Increased from 0.3
+    double fov_width = 1.0;  // Increased from 0.15
+    double fov_height = 0.5; // Increased from 0.10
 
     // Near plane corners in camera coordinates (Z forward)
     Eigen::Vector3d near_top_right(fov_width * near_plane / far_plane,
@@ -2447,7 +2463,7 @@ void CalibProcessor::publishCameraPose(const Eigen::Matrix4d &camera_pose,
     axes_marker.action = visualization_msgs::Marker::ADD;
     axes_marker.pose.position = camera_marker.pose.position;
     axes_marker.pose.orientation = camera_marker.pose.orientation;
-    axes_marker.scale.x = 0.04;              // Increased line width from 0.02
+    axes_marker.scale.x = 0.2;               // Increased line width from 0.02
     axes_marker.lifetime = ros::Duration(0); // 0 means forever
 
     // Define axis lengths

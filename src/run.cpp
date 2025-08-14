@@ -55,7 +55,8 @@ int main(int argc, char **argv) {
         config_file = argv[1];
     }
 
-    std::cout << "Using configuration file: " << config_file << std::endl;
+    std::cout
+        << "Using configuration file: " << config_file << std::endl;
 
     // Create a CalibProcessor instance
     lvmapping::CalibProcessor calib;

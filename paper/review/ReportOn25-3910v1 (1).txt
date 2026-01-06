@@ -1,0 +1,22 @@
+This paper introduces EasyColor, a method for colorizing dense LiDAR
+point clouds from image sequences without precise time synchronization
+or extrinsic calibration. It uses LiDAR reflectivity to generate
+intensity images, aligns them with RGB frames via cross-domain
+matching, and refines camera poses through joint optimization based on
+frame consistency and epipolar geometry. 
+
+Overall, the paper is well-written, well-structured, and
+well-illustrated. It addresses a relevant theme for the RA-L community.
+However, several key 
+Aspects require more clarification (please see the review reports from
+reviewers 1 and 2). The work would benefit from more convincing
+experimental support using well-established datasets and benchmarks.
+Moreover, the proposed method should be compared to the state of the
+art. The evaluation protocol and metrics should also be clarified. 
+
+Three reviewers with prior experience in computer vision and perception
+evaluated the manuscript. The reviewers’ comments and recommendations
+are attached. Based on the reviewers’ feedback (reviewer 3 is not taken
+into account because their evaluation is not substantial) and my own
+review, I suggest that the paper cannot be accepted for publication in
+RA-L.

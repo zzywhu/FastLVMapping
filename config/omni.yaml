@@ -1,0 +1,89 @@
+%YAML:1.0
+camera_model: "pinhole"  # Options: "fisheye" or "pinhole"
+# Camera parameters
+camera_matrix: !!opencv-matrix
+  rows: 3
+  cols: 3
+  dt: f
+  data: [7.188560000000e+02, 0, 6.071928000000e+02, 0, 7.188560000000e+02, 1.852157000000e+02, 0, 0, 1]
+distortion_coefficients: !!opencv-matrix
+  rows: 1
+  cols: 4
+  dt: f
+  data: [0.0, 0.0, 0.0,0.0]
+
+new_camera_matrix: !!opencv-matrix
+  rows: 3
+  cols: 3
+  dt: f
+  data: [7.188560000000e+02, 0, 6.071928000000e+02, 0, 7.188560000000e+02, 1.852157000000e+02, 0, 0, 1]
+
+resize_camera_matrix: !!opencv-matrix
+  rows: 3
+  cols: 3
+  dt: f
+  data: [400.0, 0, 400.0, 0, 400.0, 400.0, 0, 0, 1]
+  
+extrinsics: !!opencv-matrix
+  rows: 4
+  cols: 4
+  dt: d
+  data: [1,0,0,0,0,1,0,0,0,0,1,0,0, 0, 0, 1]
+# Data paths
+pcd_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/kitti_odometry/00/MapCloud.pcd
+img_path: /media/zzy/T7/SLAM_DATASET/KITTI/odometry/color/00/image_2
+traj_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/kitti_odometry/00/00.txt
+output_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/kitti_odometry/00/result
+
+# Point cloud parameters
+point_cloud_params:
+   min_depth: 0.1          # Minimum depth for visualization (meters)
+   max_depth: 50.0         # Maximum depth for visualization (meters)
+   neighborhood_size: 3    # Size of pixel neighborhood for depth checking
+
+# Projection parameters
+projection_params:
+   image_width: 1200       # Width of undistorted image
+   image_height: 300      # Height of undistorted image
+   focal_length: 700     # Focal length for pinhole projection
+   image_center_x: 600    # Image center X for pinhole projection
+   image_center_y: 150    # Image center Y for pinhole projection
+   valid_image_start_x: 200  # Start X of valid region in the image
+   valid_image_start_y: 50  # Start Y of valid region in the image
+   valid_image_end_x: 1000   # End X of valid region in the image
+   valid_image_end_y: 250   # End Y of valid region in the image
+
+# PnP parameters
+pnp_params:
+   max_rotation_diff: 0.5     # Maximum allowed rotation difference
+   max_translation_diff: 0.5  # Maximum allowed translation difference
+   reprojection_error: 8.0    # Reprojection error threshold for RANSAC
+   min_inlier_count: 10       # Minimum number of inliers required
+   ransac_iterations: 100     # Number of RANSAC iterations
+   confidence: 0.99           # RANSAC confidence level
+
+# Output parameters
+output_params:
+   visualization_tool: ""   # Path to visualization tool executable
+   viz_frequency: 10        # How often to update visualization
+
+# Processing parameters
+processing_params:
+   img_sampling_step: 2    # Step size for image sampling (e.g., 2 means every other image)
+   preprocess_sampling_step: 2  # Step size for preprocessing (every other image)
+
+# Depth processing parameters
+depth_params:
+   kernel_size: 3           # Kernel size for depth filtering
+   fill_holes: true         # Whether to fill holes in depth map
+   median_filter_size: 5    # Size of median filter for depth smoothing
+   gaussian_filter_size: 3  # Size of gaussian filter for depth smoothing
+   invert_depth: false      # Whether to invert depth values (far=bright, near=dark)
+   
+# Match parameters for feature matching
+match_params:
+   matcher_type: "FLANN"     # Feature matcher type (FLANN or BF)
+   ratio_threshold: 0.75     # Ratio test threshold for FLANN matcher
+   max_distance: 30          # Maximum pixel distance for matches
+   min_matches: 20           # Minimum number of matches required
+   use_ransac: true          # Whether to use RANSAC for match filtering

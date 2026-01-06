@@ -1,0 +1,37 @@
+This paper proposes EasyColor, a framework for generating RGB-colored
+point clouds by aligning camera images with a LiDAR reflectivity map,
+without requiring precise time synchronization or extrinsic
+calibration. The key idea is to exploit reflectivity images derived
+from LiDAR intensity to bridge the modality gap between LiDAR and
+camera, enabling cross-domain image matching. The system combines
+reflectivity–image alignment with epipolar visual constraints to
+jointly optimize camera poses and produce a photometrically consistent
+colorized map.
+
+Improvements
+- In my opinion since the objective of the paper is coloring
+pointcloud, just using pose estimation as accuracy is not enough. A
+comparison is PSNR and SSIM of reprojected images with Omnicolor or
+mutual information based methods is required to validate the claims. 
+- Assumptions of the prebuild point cloud map is not clear. It is
+unclear how the quality of this map affects performance — e.g., what
+happens with sparse or noisy maps? How is the point cloud map
+generated? What are the expectations on its accuracy? I am assuming
+FastLIO2 just aligns the pointclouds based on odometry.
+- On equation 1, it is not clear if every point is converted to image
+frame. For i>2, does it not project to the world frame. Please clarify.
+- In epipolar constrainst why not use translation? The pose between two
+camera frames can obviously be estimated based on PnP which can easily
+constrain the translation. Am I missing something here?
+
+
+Minor
+
+- Eq 5, I doubt we have photometric residuals?
+- the use of &#8741;·&#8741;&#8734; in Eq. 7’s neighborhood definition)
+could be confusing — using L&#8734; norm for pixel neighborhoods is
+unusual.
+- I am curious if this produces camera-LiDAR accurate calibration as
+byproduct or not. Have you tested that?
+
+The paper is well written.

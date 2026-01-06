@@ -1,0 +1,105 @@
+%YAML:1.0
+# Camera parameters
+camera_model: "pinhole"  # Options: "fisheye" or "pinhole"
+camera_matrix: !!opencv-matrix
+  rows: 3
+  cols: 3
+  dt: f
+  data: [1444.431662789634 , 0, 1177.801079401826, 0, 1444.343536688358, 1043.601026568268, 0, 0, 1]
+distortion_coefficients: !!opencv-matrix
+  rows: 1
+  cols: 4
+  dt: f
+  data: [-0.05729528706141188, 0.1210407244166642, 0.001274128378760289, 0.0004389741530109464]
+
+new_camera_matrix: !!opencv-matrix
+  rows: 3
+  cols: 3
+  dt: f
+  data: [1444.0, 0, 1224.0, 0, 1444.0, 1024.0, 0, 0, 1]
+
+resize_camera_matrix: !!opencv-matrix
+  rows: 3
+  cols: 3
+  dt: f
+  data: [361.0, 0, 306.0, 0, 361.0, 256.0, 0, 0, 1]
+
+# extrinsics: !!opencv-matrix
+#   rows: 4
+#   cols: 4
+#   dt: d
+#   data: [0.00438814,-0.999807,-0.0191582, 0.016069, -0.00978695,0.0191145,-0.999769, 0.0871753,0.999942,0.00457463,-0.00970118, -0.0718021, 0, 0, 0, 1]
+
+extrinsics: !!opencv-matrix
+  rows: 4
+  cols: 4
+  dt: d
+  data: [0.00438814,-0.899807,-0.0191582, 0.016069, -0.00978695,0.0191145,-0.879769, 0.0871753,0.999942,0.00457463,-0.00970118, -0.1718021, 0, 0, 0, 1]
+
+# Data paths
+pcd_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/hkisland/MapCloud.pcd
+img_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/hkisland/image
+traj_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/hkisland/traj.txt
+output_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/hkisland/result
+
+# Point cloud parameters - 点云参数
+point_cloud_params:
+   min_depth: 50         # 可视化的最小深度 (米)
+   max_depth: 150.0         # 可视化的最大深度 (米)
+   neighborhood_size: 2    # 深度检查的像素邻域大小
+   sky_invalid_ratio_threshold: 0.8  # 天空无效比例阈值
+   depth_discontinuity_threshold: 100  # 深度不连续阈值
+   gradient_kernel_size: 10  # 梯度计算核大小
+   sky_detection_kernel_size: 20 # 天空检测核大小
+   
+
+# Projection parameters - 投影参数
+projection_params:
+   image_width: 1224       # 去畸变图像宽度
+   image_height: 1024      # 去畸变图像高度
+   focal_length: 1444      # 针孔投影的焦距
+   image_center_x: 1224  # 针孔投影的图像中心X坐标
+   image_center_y: 1024    # 针孔投影的图像中心Y坐标
+   valid_image_start_x: 0  # 图像有效区域起始X坐标
+   valid_image_start_y: 0  # 图像有效区域起始Y坐标
+   valid_image_end_x: 2448   # 图像有效区域结束X坐标
+   valid_image_end_y: 2048   # 图像有效区域结束Y坐标
+
+# PnP parameters - PnP参数
+pnp_params:
+   max_rotation_diff: 2     # 允许的最大旋转差异
+   max_translation_diff: 2  # 允许的最大平移差异
+   reprojection_error: 2    # RANSAC的重投影误ee差阈值
+   min_inlier_count: 20       # 所需的最小内点数
+   ransac_iterations: 100     # RANSAC迭代次数
+   confidence: 0.99           # RANSAC置信度
+
+# Output parameters - 输出参数
+output_params:
+   visualization_tool: "pcl_viewer"  # 可视化工具可执行文件路径
+   viz_frequency: 10        # 更新可视化的频率
+
+# Processing parameters - 处理参数
+processing_params:
+   img_sampling_step: 8    # 图像采样步长 (例如，2表示每隔一张图像)
+   image_downscale_factor: 1.0  # 图像缩放因子 (1.0表示不缩放，2.0表示缩小一半)
+   preprocess_sampling_step: 4  # 预处理的采样步长 (每隔一张图像)
+   use_extrinsic_optimization: 0 # 是否使用外参优化
+   use_time: 0                    # 是否使用时间信息
+
+
+# Depth processing parameters - 深度处理参数
+depth_params:
+   kernel_size: 5           # 深度过滤的核大小
+   fill_holes: true         # 是否填补深度图中的空洞
+   median_filter_size: 5    # 深度平滑的中值滤波器大小
+   gaussian_filter_size: 3  # 深度平滑的高斯滤波器大小
+   invert_depth: false      # 是否反转深度值 (远=亮，近=暗)
+   
+# Match parameters for feature matching - 特征匹配参数
+match_params:
+   matcher_type: "FLANN"    # 特征匹配器类型 (FLANN或BF)
+   ratio_threshold: 0.75    # FLANN匹配器的比率测试阈值
+   max_distance: 30         # 匹配的最大像素距离
+   min_matches: 20          # 所需的最小匹配数
+   use_ransac: true         # 是否使用RANSAC进行匹配过滤

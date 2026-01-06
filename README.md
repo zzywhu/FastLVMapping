@@ -7,3 +7,7 @@ A novel package for fully automatic point cloud map coloring without accurate Li
 
 # VO & P-n-P joint optimization
 ![image](demo/campus/run.jpg)
+
+#to do 
+1. add optimization uncertainties
+2. revise project

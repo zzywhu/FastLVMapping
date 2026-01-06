@@ -1,0 +1,87 @@
+
+## 1. General Assessment
+
+This paper presents EasyColor, a method for colorizing dense LiDAR
+point clouds using an image sequence without relying on accurate time
+synchronization or extrinsic calibration. The approach uses LiDAR
+reflectivity to generate intensity images, aligns them with RGB frames
+through cross-domain matching, and refines camera poses via joint
+optimization constrained by frame consistency and epipolar geometry.  
+
+The overall framework is well structured and addresses a relevant
+problem in 3D perception and autonomous mapping. However, several key
+aspects require clarification and stronger experimental support. In
+particular, the core problem formulation, comparative validation, and
+evaluation strategy need refinement before the work can be considered
+for publication.  
+
+---
+
+## 2. Major Concerns
+
+### 2.1 Task Framing and Problem Definition
+Although the stated goal is dense point cloud colorization, the
+methodology effectively reduces the problem to estimating camera poses,
+resembling a visual odometry task aided by LiDAR intensity cues.  
+The authors should clearly differentiate the objectives and outputs of
+EasyColor from standard LiDAR–camera odometry or SLAM approaches:
+- What unique challenges arise in colorization that are not addressed
+by odometry?  
+- How does the optimization directly contribute to improved color
+consistency rather than just pose refinement?  
+Clarifying this conceptual distinction is essential for evaluating the
+novelty of the work.
+
+### 2.2 Lack of Comparative Evaluation
+A significant limitation is the absence of direct comparisons with
+other frameworks that perform the same task. The Related Work section
+lists prior methods such as OmniColor, LVBA, and Koide’s approach, yet
+none are quantitatively compared.  
+Including baseline comparisons on shared datasets (for example,
+KITTI-360 or SemanticKITTI) would significantly strengthen the
+contribution and demonstrate EasyColor’s relative performance and
+applicability.
+
+### 2.3 Synchronization and Temporal Constraints
+The paper claims that EasyColor does not require time synchronization
+between the LiDAR point cloud and image sequence. However, this is only
+discussed qualitatively.  
+The authors should:
+- Provide the frame rate or sampling frequency used in the experiments.
+ 
+- Describe the maximum tolerable time offset or frame gap beyond which
+performance deteriorates.  
+- Clarify whether the algorithm assumes continuous motion or static
+scenes.  
+Such details are essential to support the claim of “no synchronization
+requirement.”
+
+### 2.4 Quantitative Evaluation of Colorization
+The authors state that assessing the colorization quality is difficult
+due to the absence of ground truth and dismiss existing 2D-based
+metrics as unsuitable. However, a 2D projection-based metric could
+still offer useful quantitative insights.  
+It is strongly recommended to include at least one approximate
+evaluation metric, such as:
+- Projection-based PSNR or SSIM between reprojected colorized views and
+camera images, or  
+- A pixel-wise color consistency error across adjacent frames.	
+Even if imperfect, these would provide a reproducible measure of
+colorization performance.
+
+---
+
+## 3. Additional Technical and Presentation Comments
+
+- Provide more detail on how rough extrinsic parameters are initialized
+(manual estimation or default sensor setup).  
+- Clarify whether LiDAR reflectivity intensity is preprocessed
+(normalized, filtered, or range-compensated).  
+- Indicate how the optimization weights were chosen (&#955; parameters
+in Eq. 5).  
+- Discuss potential failure cases, such as dynamic objects or
+non-overlapping fields of view.  
+- Figures are clear but somewhat overloaded; simplifying Figures 2, 6,
+and 10 could improve readability.  
+- Typographical corrections: “cosrresponding” &#8594; “corresponding”;
+“pf unreliable” &#8594; “of unreliable.”  

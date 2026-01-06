@@ -26,7 +26,24 @@ void Config::setDefaultValues() {
     // Set default point cloud parameters
     pc_params_.min_depth = 0.1f;
     pc_params_.max_depth = 50.0f;
-    pc_params_.neighborhood_size = 2;
+
+    // 统一的质量控制开关
+    pc_params_.enable_quality_filtering = true; // 默认启用质量过滤
+
+    // 质量过滤相关参数
+    pc_params_.neighborhood_size = 5;
+    pc_params_.depth_discontinuity_threshold = 0.5f;
+    pc_params_.gradient_kernel_size = 5;
+    pc_params_.depth_ratio_threshold = 2.0f;
+    pc_params_.min_neighbor_count = 2;
+
+    // 可视化参数
+    pc_params_.save_edge_visualization = true;
+    pc_params_.save_gradient_visualization = true;
+
+    // 保留的旧参数（为了兼容性）
+    pc_params_.sky_invalid_ratio_threshold = 0.3f;
+    pc_params_.sky_detection_kernel_size = 7;
 
     // Set default projection parameters
     proj_params_.image_width = 3000;
@@ -116,11 +133,34 @@ bool Config::loadFromYAML(const std::string &config_file) {
     if (fs["point_cloud_params"].isMap()) {
         fs["point_cloud_params"]["min_depth"] >> pc_params_.min_depth;
         fs["point_cloud_params"]["max_depth"] >> pc_params_.max_depth;
-        fs["point_cloud_params"]["neighborhood_size"] >> pc_params_.neighborhood_size;
-        fs["point_cloud_params"]["sky_invalid_ratio_threshold"] >> pc_params_.sky_invalid_ratio_threshold;
-        fs["point_cloud_params"]["depth_discontinuity_threshold"] >> pc_params_.depth_discontinuity_threshold;
-        fs["point_cloud_params"]["gradient_kernel_size"] >> pc_params_.gradient_kernel_size;
-        fs["point_cloud_params"]["sky_detection_kernel_size"] >> pc_params_.sky_detection_kernel_size;
+
+        // 读取统一质量控制开关
+        if (!fs["point_cloud_params"]["enable_quality_filtering"].empty())
+            fs["point_cloud_params"]["enable_quality_filtering"] >> pc_params_.enable_quality_filtering;
+
+        // 读取质量过滤相关参数
+        if (!fs["point_cloud_params"]["neighborhood_size"].empty())
+            fs["point_cloud_params"]["neighborhood_size"] >> pc_params_.neighborhood_size;
+        if (!fs["point_cloud_params"]["depth_discontinuity_threshold"].empty())
+            fs["point_cloud_params"]["depth_discontinuity_threshold"] >> pc_params_.depth_discontinuity_threshold;
+        if (!fs["point_cloud_params"]["gradient_kernel_size"].empty())
+            fs["point_cloud_params"]["gradient_kernel_size"] >> pc_params_.gradient_kernel_size;
+        if (!fs["point_cloud_params"]["depth_ratio_threshold"].empty())
+            fs["point_cloud_params"]["depth_ratio_threshold"] >> pc_params_.depth_ratio_threshold;
+        if (!fs["point_cloud_params"]["min_neighbor_count"].empty())
+            fs["point_cloud_params"]["min_neighbor_count"] >> pc_params_.min_neighbor_count;
+
+        // 读取可视化参数
+        if (!fs["point_cloud_params"]["save_edge_visualization"].empty())
+            fs["point_cloud_params"]["save_edge_visualization"] >> pc_params_.save_edge_visualization;
+        if (!fs["point_cloud_params"]["save_gradient_visualization"].empty())
+            fs["point_cloud_params"]["save_gradient_visualization"] >> pc_params_.save_gradient_visualization;
+
+        // 读取保留的旧参数（为了兼容性）
+        if (!fs["point_cloud_params"]["sky_invalid_ratio_threshold"].empty())
+            fs["point_cloud_params"]["sky_invalid_ratio_threshold"] >> pc_params_.sky_invalid_ratio_threshold;
+        if (!fs["point_cloud_params"]["sky_detection_kernel_size"].empty())
+            fs["point_cloud_params"]["sky_detection_kernel_size"] >> pc_params_.sky_detection_kernel_size;
     }
 
     // Read projection parameters
@@ -174,6 +214,8 @@ bool Config::loadFromYAML(const std::string &config_file) {
 
         if (!fs["processing_params"]["use_extrinsic_optimization"].empty())
             fs["processing_params"]["use_extrinsic_optimization"] >> processing_params_.use_extrinsic_optimization;
+        if (!fs["processing_params"]["use_time"].empty())
+            fs["processing_params"]["use_time"] >> processing_params_.use_time;
         std::cout << processing_params_.use_extrinsic_optimization << std::endl;
     }
 
@@ -201,6 +243,16 @@ bool Config::loadFromYAML(const std::string &config_file) {
 
     if (!paths_valid) {
         std::cerr << "One or more required paths are not properly set in config file: " << config_file << std::endl;
+    }
+
+    // 打印质量过滤设置
+    std::cout << "Quality filtering configuration:" << std::endl;
+    std::cout << "  - Enable quality filtering: " << (pc_params_.enable_quality_filtering ? "true" : "false") << std::endl;
+    if (pc_params_.enable_quality_filtering) {
+        std::cout << "  - Depth discontinuity threshold: " << pc_params_.depth_discontinuity_threshold << std::endl;
+        std::cout << "  - Depth ratio threshold: " << pc_params_.depth_ratio_threshold << std::endl;
+        std::cout << "  - Gradient kernel size: " << pc_params_.gradient_kernel_size << std::endl;
+        std::cout << "  - Min neighbor count: " << pc_params_.min_neighbor_count << std::endl;
     }
 
     fs.release();
@@ -239,7 +291,24 @@ void Config::saveToYAML(const std::string &config_file) const {
        << "{";
     fs << "min_depth" << pc_params_.min_depth;
     fs << "max_depth" << pc_params_.max_depth;
+
+    // 保存统一质量控制开关
+    fs << "enable_quality_filtering" << pc_params_.enable_quality_filtering;
+
+    // 保存质量过滤相关参数
     fs << "neighborhood_size" << pc_params_.neighborhood_size;
+    fs << "depth_discontinuity_threshold" << pc_params_.depth_discontinuity_threshold;
+    fs << "gradient_kernel_size" << pc_params_.gradient_kernel_size;
+    fs << "depth_ratio_threshold" << pc_params_.depth_ratio_threshold;
+    fs << "min_neighbor_count" << pc_params_.min_neighbor_count;
+
+    // 保存可视化参数
+    fs << "save_edge_visualization" << pc_params_.save_edge_visualization;
+    fs << "save_gradient_visualization" << pc_params_.save_gradient_visualization;
+
+    // 保存保留的旧参数（为了兼容性）
+    fs << "sky_invalid_ratio_threshold" << pc_params_.sky_invalid_ratio_threshold;
+    fs << "sky_detection_kernel_size" << pc_params_.sky_detection_kernel_size;
     fs << "}";
 
     // Save projection parameters
@@ -283,6 +352,7 @@ void Config::saveToYAML(const std::string &config_file) const {
     fs << "output_path" << processing_params_.output_path;
     fs << "img_sampling_step" << processing_params_.img_sampling_step;
     fs << "image_downscale_factor" << processing_params_.image_downscale_factor;
+    fs << "use_extrinsic_optimization" << processing_params_.use_extrinsic_optimization;
     fs << "}";
 
     fs.release();

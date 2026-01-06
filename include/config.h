@@ -35,13 +35,26 @@ public:
 
     // Point cloud processing parameters
     struct PointCloudParams {
-        float min_depth;                     // Minimum valid depth (meters)
-        float max_depth;                     // Maximum valid depth (meters)
+        float min_depth; // Minimum valid depth (meters)
+        float max_depth; // Maximum valid depth (meters)
+
+        // 统一的质量控制开关
+        bool enable_quality_filtering; // Main switch: enable all quality filtering mechanisms
+
+        // 当 enable_quality_filtering 为 true 时，以下参数生效：
         int neighborhood_size;               // Size of pixel neighborhood for depth checking
-        float sky_invalid_ratio_threshold;   // Threshold for invalid depth ratio in sky detection
         float depth_discontinuity_threshold; // Threshold for depth discontinuity
         int gradient_kernel_size;            // Kernel size for gradient calculation
-        int sky_detection_kernel_size;       // Kernel size for sky detection
+        float depth_ratio_threshold;         // Depth ratio threshold for neighborhood check
+        int min_neighbor_count;              // Minimum neighbor count for neighborhood check
+
+        // 可视化参数（总是生效）
+        bool save_edge_visualization;     // Whether to save edge visualization images
+        bool save_gradient_visualization; // Whether to save gradient visualization images
+
+        // 保留的旧参数（为了兼容性）
+        float sky_invalid_ratio_threshold; // Threshold for invalid depth ratio in sky detection
+        int sky_detection_kernel_size;     // Kernel size for sky detection
     };
 
     // Projection parameters
@@ -82,6 +95,7 @@ public:
         int img_sampling_step;
         double image_downscale_factor; // Add this field to fix compilation error
         bool use_extrinsic_optimization;
+        bool use_time;
     };
 
     // Getters for parameter groups

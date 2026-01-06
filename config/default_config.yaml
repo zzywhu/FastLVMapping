@@ -31,20 +31,20 @@ extrinsics: !!opencv-matrix
   data: [-0.00297174, 0.99999, -0.00331239, 0.0642425, 0.00781543, -0.00328908, -0.999964, 0.281943, -0.999965, -0.00299752, -0.00780558, 0.0424095, 0, 0, 0, 1]
 
 # Data paths
-pcd_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/loop3/MapCloud.pcd
-img_path: /media/zzy/T7/SLAM_DATASET/Rot_LVI-SLAM/LOOP/loop3/3/2
-traj_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/loop3/traj.txt
-output_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/loop3/result
+pcd_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/mall/MapCloud.pcd
+img_path: /media/zzy/T7/SLAM_DATASET/Rot_LVI-SLAM/stair/office1/2
+traj_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/mall/traj.txt
+output_path: /media/zzy/T7/SLAM_DATASET/test_color_mapping/mall/result
 
-# Point cloud parameters - 点云参数
 point_cloud_params:
    min_depth: 0.1          # 可视化的最小深度 (米)
    max_depth: 50.0         # 可视化的最大深度 (米)
-   neighborhood_size: 3  # 深度检查的像素邻域大小
-   sky_invalid_ratio_threshold: 0.05  # 天空无效比例阈值
-   depth_discontinuity_threshold: 0.5 # 深度不连续阈值
+   neighborhood_size: 5   # 深度检查的像素邻域大小
+   sky_invalid_ratio_threshold: 0.1  # 天空无效比例阈值
+   depth_discontinuity_threshold: 0.2 # 深度不连续阈值
    gradient_kernel_size: 5  # 梯度计算核大小
    sky_detection_kernel_size: 20 # 天空检测核大小
+   
 
 # Projection parameters - 投影参数
 projection_params:
@@ -77,7 +77,9 @@ processing_params:
    img_sampling_step: 2    # 图像采样步长 (例如，2表示每隔一张图像)
    image_downscale_factor: 1.0  # 图像缩放因子 (1.0表示不缩放，2.0表示缩小一半)
    preprocess_sampling_step: 2  # 预处理的采样步长 (每隔一张图像)
-   use_extrinsic_optimization: 1  # 是否使用外参优化 
+   use_extrinsic_optimization: 1 # 是否使用外参优化
+   use_time: 1                    # 是否使用时间信息
+
 
 # Depth processing parameters - 深度处理参数
 depth_params:

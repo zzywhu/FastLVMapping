@@ -191,6 +191,8 @@ private:
     void publishColoredPointCloud(const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &cloud, double timestamp);
     void publishCameraPose(const Eigen::Matrix4d &camera_pose, double timestamp);
     void publishMatchImage(const std::string &match_image_path, double timestamp);
+    void publishDepthImage(const cv::Mat &depth_image, double timestamp);
+    void publishImage(const cv::Mat &depth_image, double timestamp);
 
     // Data members
     cv::Mat camera_matrix_;
@@ -226,6 +228,8 @@ private:
     ros::Publisher camera_pose_pub_;
     ros::Publisher camera_trajectory_pub_;
     image_transport::Publisher match_image_pub_;
+    image_transport::Publisher depth_image_pub_;
+    image_transport::Publisher image_pub_;
     tf2_ros::TransformBroadcaster tf_broadcaster_;
     std::string frame_id_;
     bool ros_initialized_;

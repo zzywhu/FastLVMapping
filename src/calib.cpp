@@ -81,6 +81,10 @@ void CalibProcessor::initializeROS() {
     image_transport::ImageTransport it(*nh_);
     match_image_pub_ = it.advertise("match_visualization", 1);
 
+    depth_image_pub_ = it.advertise("depth_visualization", 1);
+
+    image_pub_ = it.advertise("input_image", 1);
+
     // Set default frame ID - Make sure this matches what's in your RViz config
     frame_id_ = "map"; // This should match the Fixed Frame in RViz
 
@@ -294,7 +298,7 @@ bool CalibProcessor::updateExtrinsics(
         cv::Mat::zeros(1, 5, CV_64F), rvec, tvec, true,
         pnp_params.ransac_iterations, pnp_params.reprojection_error,
         pnp_params.confidence, inliers, cv::SOLVEPNP_ITERATIVE);
-    if (pnp_success) {
+    if (pnp_success && inliers.rows > pnp_params.min_inlier_count) {
         std::cout << "PnP successful with " << inliers.rows << " inliers out of "
                   << obj_points.size() << " points" << std::endl;
 
@@ -406,7 +410,6 @@ bool CalibProcessor::saveExtrinsicsForTimestamp(
 
     return true;
 }
-
 bool CalibProcessor::colorizePointCloud(
     const cv::Mat &undistorted_img, const Eigen::Matrix4d &camera_pose,
     const pcl::PointCloud<pcl::PointXYZI>::Ptr &cloud,
@@ -432,19 +435,20 @@ bool CalibProcessor::colorizePointCloud(
     // 新增：创建深度梯度检测缓冲区
     cv::Mat depth_gradient_buffer(depth_viz_img.size(), CV_32F, cv::Scalar(0.0f));
 
-    // 优化步骤1：预分配空间并预过滤已着色的点
+    // 统计跳过的已着色点数量
+    std::atomic<int> skipped_colored_points(0);
+    std::atomic<int> filtered_valid_points(0);
+
+    // 优化步骤1：预分配空间以减少锁竞争
     std::vector<pcl::PointXYZI> filtered_points;
     std::vector<int> filtered_indices;
     filtered_points.reserve(cloud->size() / 4);
     filtered_indices.reserve(cloud->size() / 4);
 
-    // 统计跳过的已着色点数量
-    std::atomic<int> skipped_colored_points(0);
-
     // 优化步骤2：使用更大的块大小，让每个线程处理更多连续的点
     const size_t block_size = 4096;
 
-// 优化步骤3：先过滤所有点，分成两阶段来减少线程同步和临界区
+// 优化步骤3：先过滤所有点，分成两阶段来减少线程同步和临界区（跳过已着色点）
 #pragma omp parallel if (OPENMP_FOUND)
     {
         // 每个线程局部存储过滤后的点，避免频繁的锁竞争
@@ -454,16 +458,16 @@ bool CalibProcessor::colorizePointCloud(
         local_filtered_indices.reserve(block_size);
 
         int local_skipped_count = 0;
+        int local_valid_count = 0;
 
-// 第一阶段：视锥体过滤和已着色点过滤
+// 第一阶段：视锥体过滤（跳过已着色点）
 #pragma omp for schedule(dynamic, block_size)
         for (size_t i = 0; i < cloud->points.size(); i++) {
-            // **新增：检查点是否已经被着色过**
-            if (point_color_count[i] > 0) {
-                // 如果点已经被着色过，跳过处理
-                local_skipped_count++;
-                continue;
-            }
+            // **检查点是否已经被着色，如果是则跳过**
+            // if (point_color_count[i] > 0) {
+            //     local_skipped_count++;
+            //     continue;
+            // }
 
             Eigen::Vector4d pt_world(cloud->points[i].x, cloud->points[i].y,
                                      cloud->points[i].z, 1.0);
@@ -482,11 +486,12 @@ bool CalibProcessor::colorizePointCloud(
                 // 添加到本地线程存储
                 local_filtered_points.push_back(cloud->points[i]);
                 local_filtered_indices.push_back(i);
+                local_valid_count++;
             }
         }
 
-        // 更新跳过的点数统计
         skipped_colored_points += local_skipped_count;
+        filtered_valid_points += local_valid_count;
 
 // 合并本地结果到全局容器
 #pragma omp critical
@@ -500,9 +505,14 @@ bool CalibProcessor::colorizePointCloud(
         }
     }
 
-    // 打印跳过的已着色点统计信息
-    if (skipped_colored_points > 0) {
-        std::cout << "Skipped " << skipped_colored_points << " already colored points in frustum filtering" << std::endl;
+    std::cout << "Frame " << timestamp << " filtering:" << std::endl;
+    std::cout << "  - Skipped already colored points: " << skipped_colored_points.load() << std::endl;
+    std::cout << "  - Valid points for processing: " << filtered_valid_points.load() << std::endl;
+
+    // 如果没有有效点需要处理，直接返回
+    if (filtered_points.empty()) {
+        std::cout << "  - No new points to process for this frame" << std::endl;
+        return false;
     }
 
     // 优化步骤4：批量构建深度缓冲区，减少锁竞争
@@ -577,11 +587,10 @@ bool CalibProcessor::colorizePointCloud(
         }
     }
 
-    // [深度梯度计算代码保持不变...]
-    const float depth_discontinuity_threshold = pc_params.depth_discontinuity_threshold;
-    const int gradient_kernel_size = pc_params.gradient_kernel_size;
-    const int sky_detection_kernel_size = pc_params.sky_detection_kernel_size;
-    const float sky_invalid_ratio_threshold = pc_params.sky_invalid_ratio_threshold;
+    const float depth_discontinuity_threshold = pc_params.depth_discontinuity_threshold; // 深度不连续阈值（米）
+    const int gradient_kernel_size = pc_params.gradient_kernel_size;                     // 梯度计算核大小
+    const int sky_detection_kernel_size = pc_params.sky_detection_kernel_size;           // 天空检测核大小
+    const float sky_invalid_ratio_threshold = pc_params.sky_invalid_ratio_threshold;     // 无效深度比例阈值
 
 #pragma omp parallel for collapse(2) if (OPENMP_FOUND)
     for (int y = std::max(gradient_kernel_size, sky_detection_kernel_size);
@@ -590,21 +599,25 @@ bool CalibProcessor::colorizePointCloud(
              x < depth_buffer.cols - std::max(gradient_kernel_size, sky_detection_kernel_size); x++) {
             float center_depth = depth_buffer.at<float>(y, x);
 
+            // 如果中心像素没有有效深度，跳过
             if (center_depth == std::numeric_limits<float>::max()) {
                 continue;
             }
 
+            // 1. 计算周围的深度梯度（原有逻辑）
             float max_gradient = 0.0f;
 
+            // 检查3x3邻域内的深度变化
             for (int dy = -1; dy <= 1; dy++) {
                 for (int dx = -1; dx <= 1; dx++) {
-                    if (dx == 0 && dy == 0) continue;
+                    if (dx == 0 && dy == 0) continue; // 跳过中心点
 
                     int neighbor_x = x + dx;
                     int neighbor_y = y + dy;
 
                     float neighbor_depth = depth_buffer.at<float>(neighbor_y, neighbor_x);
 
+                    // 如果邻居有有效深度，计算梯度
                     if (neighbor_depth != std::numeric_limits<float>::max()) {
                         float gradient = std::abs(center_depth - neighbor_depth);
                         max_gradient = std::max(max_gradient, gradient);
@@ -612,12 +625,14 @@ bool CalibProcessor::colorizePointCloud(
                 }
             }
 
+            // 2. 新增：检测天空或背景区域（周围大量无效深度）
             int total_neighbors = 0;
             int invalid_neighbors = 0;
 
+            // 在更大的邻域内检查无效深度的比例
             for (int dy = -sky_detection_kernel_size; dy <= sky_detection_kernel_size; dy++) {
                 for (int dx = -sky_detection_kernel_size; dx <= sky_detection_kernel_size; dx++) {
-                    if (dx == 0 && dy == 0) continue;
+                    if (dx == 0 && dy == 0) continue; // 跳过中心点
 
                     int neighbor_x = x + dx;
                     int neighbor_y = y + dy;
@@ -631,11 +646,14 @@ bool CalibProcessor::colorizePointCloud(
                 }
             }
 
+            // 计算无效深度比例
             float invalid_ratio = static_cast<float>(invalid_neighbors) / total_neighbors;
 
+            // 3. 新增：检测深度跳跃（前景到背景的突变）
             bool has_depth_jump = false;
-            const float depth_jump_threshold = 2.0f;
+            const float depth_jump_threshold = 2.0f; // 深度跳跃阈值（米）
 
+            // 检查是否存在从近距离到远距离的跳跃
             for (int dy = -1; dy <= 1; dy++) {
                 for (int dx = -1; dx <= 1; dx++) {
                     if (dx == 0 && dy == 0) continue;
@@ -646,6 +664,7 @@ bool CalibProcessor::colorizePointCloud(
                     float neighbor_depth = depth_buffer.at<float>(neighbor_y, neighbor_x);
 
                     if (neighbor_depth != std::numeric_limits<float>::max()) {
+                        // 如果邻居深度远大于中心深度，可能是前景到背景的跳跃
                         if (neighbor_depth - center_depth > depth_jump_threshold) {
                             has_depth_jump = true;
                             break;
@@ -655,12 +674,15 @@ bool CalibProcessor::colorizePointCloud(
                 if (has_depth_jump) break;
             }
 
+            // 综合判断：设置梯度值
             float final_gradient = max_gradient;
 
+            // 如果周围无效深度比例过高，认为是天空
             if (invalid_ratio > sky_invalid_ratio_threshold) {
                 final_gradient = std::max(final_gradient, depth_discontinuity_threshold * 1.5f);
             }
 
+            // 如果存在深度跳跃，增加梯度值
             if (has_depth_jump) {
                 final_gradient = std::max(final_gradient, depth_discontinuity_threshold * 1.2f);
             }
@@ -672,7 +694,7 @@ bool CalibProcessor::colorizePointCloud(
     // 第二阶段：给点云着色并创建可视化（增加深度不连续检测）
     int colored_count = 0;
     std::atomic<int> atomic_colored_count(0);
-    std::atomic<int> atomic_skipped_already_colored(0);
+    std::atomic<int> atomic_skipped_discontinuity(0);
 
 // 优化步骤6：使用图像块并行处理
 #pragma omp parallel for collapse(2) schedule(dynamic) if (OPENMP_FOUND)
@@ -683,29 +705,39 @@ bool CalibProcessor::colorizePointCloud(
             int end_x = std::min(start_x + block_width, proj_params.valid_image_end_x);
             int end_y = std::min(start_y + block_height, proj_params.valid_image_end_y);
 
+            // 块内局部计数器
             int local_colored_count = 0;
-            int local_skipped_count = 0;
+            int local_skipped_discontinuity = 0;
+            int local_skipped_already_colored = 0;
 
+            // 对块内每个像素处理
             for (int y = start_y; y < end_y; y++) {
                 for (int x = start_x; x < end_x; x++) {
                     int point_idx = point_index_buffer.at<int>(y, x);
                     if (point_idx >= 0) {
-                        // **新增：再次检查点是否已经被着色过**
-                        if (point_color_count[point_idx] > 0) {
-                            local_skipped_count++;
-                            continue;
-                        }
-
+                        // 获取深度值
                         float depth = depth_buffer.at<float>(y, x);
 
+                        // 新增：检查深度不连续性
                         float depth_gradient = 0.0f;
                         if (y >= gradient_kernel_size && y < depth_gradient_buffer.rows - gradient_kernel_size && x >= gradient_kernel_size && x < depth_gradient_buffer.cols - gradient_kernel_size) {
                             depth_gradient = depth_gradient_buffer.at<float>(y, x);
                         }
 
+                        // 如果深度梯度超过阈值，跳过此点的着色（认为是边缘不连续区域）
                         if (depth_gradient > depth_discontinuity_threshold) {
-                            depth_viz_img.at<cv::Vec3b>(y, x) = cv::Vec3b(0, 0, 255);
-                            continue;
+                            // 在深度可视化中标记为红色（可选，用于调试）
+                            // 创建深度可视化
+                            float normalized_depth = (depth - pc_params.min_depth) / (pc_params.max_depth - pc_params.min_depth);
+                            normalized_depth = std::min(std::max(normalized_depth, 0.0f), 1.0f);
+
+                            int r = static_cast<int>((1.0f - normalized_depth) * 255);
+                            int g = static_cast<int>((normalized_depth > 0.5f ? 1.0f - normalized_depth : normalized_depth) * 255);
+                            int b = static_cast<int>(normalized_depth * 255);
+
+                            depth_viz_img.at<cv::Vec3b>(y, x) = cv::Vec3b(b, g, r);
+                            local_skipped_discontinuity++;
+                            continue; // 跳过着色
                         }
 
                         // 创建深度可视化
@@ -721,65 +753,146 @@ bool CalibProcessor::colorizePointCloud(
                         // 给点云上色
                         cv::Vec3b color = undistorted_img.at<cv::Vec3b>(y, x);
 
-                        // **修改：使用原子操作确保线程安全的着色**
-                        int expected_count = 0;
-                        if (std::atomic_compare_exchange_strong(
-                                reinterpret_cast<std::atomic<int> *>(&point_color_count[point_idx]),
-                                &expected_count, 1)) {
-                            // 成功设置颜色计数，现在进行着色
-                            colored_cloud->points[point_idx].b = color[0];
-                            colored_cloud->points[point_idx].g = color[1];
-                            colored_cloud->points[point_idx].r = color[2];
+                        // 更新点云颜色
+                        colored_cloud->points[point_idx].b = color[0];
+                        colored_cloud->points[point_idx].g = color[1];
+                        colored_cloud->points[point_idx].r = color[2];
 
-                            // 标记这个点在此帧中被着色
-                            colored_in_this_frame[point_idx] = true;
+                        // 标记这个点在此帧中被着色
+                        colored_in_this_frame[point_idx] = true;
 
-                            local_colored_count++;
-                        } else {
-                            // 点已经被其他线程着色了
-                            local_skipped_count++;
-                        }
+                        // 递增此点的颜色计数
+                        point_color_count[point_idx]++;
+
+                        local_colored_count++;
                     }
                 }
             }
 
+            // 更新全局计数（原子操作）
             atomic_colored_count += local_colored_count;
-            atomic_skipped_already_colored += local_skipped_count;
+            atomic_skipped_discontinuity += local_skipped_discontinuity;
+            //atomic_skipped_already_colored += local_skipped_already_colored;
         }
     }
 
+    // 获取最终着色点数
     colored_count = atomic_colored_count.load();
-    int total_skipped = atomic_skipped_already_colored.load();
+    int skipped_discontinuity = atomic_skipped_discontinuity.load();
 
-    // 打印详细统计信息
-    if (total_skipped > 0 || skipped_colored_points > 0) {
-        std::cout << "Frame " << timestamp << ": Colored " << colored_count
-                  << " new points, skipped " << (total_skipped + skipped_colored_points.load())
-                  << " already colored points (frustum: " << skipped_colored_points.load()
-                  << ", pixel-level: " << total_skipped << ")" << std::endl;
-    }
+    std::cout << "  - Successfully colored: " << colored_count << " new points" << std::endl;
+    std::cout << "  - Skipped (discontinuity): " << skipped_discontinuity << " points" << std::endl;
 
-    // [保存可视化代码保持不变...]
+    // 仅当有点被着色时才保存深度可视化图像
+    // ...existing code...
+
+    // 仅当有点被着色时才保存深度可视化图像
     if (colored_count > 0) {
         std::string depth_viz_dir = output_folder + "/depth_viz";
         if (!fs::exists(depth_viz_dir)) {
             fs::create_directories(depth_viz_dir);
         }
 
-        std::string depth_viz_path = depth_viz_dir + "/" + std::to_string(timestamp) + "_depth.png";
-        cv::imwrite(depth_viz_path, depth_viz_img);
+        // // 保存伪彩色深度图
+        // std::string depth_viz_path = depth_viz_dir + "/" + std::to_string(timestamp) + "_depth.png";
+        // publishDepthImage(depth_viz_img, timestamp); // 发布深度图像
+        // cv::imwrite(depth_viz_path, depth_viz_img);
 
-        cv::Mat gradient_viz_img;
-        cv::normalize(depth_gradient_buffer, gradient_viz_img, 0, 255, cv::NORM_MINMAX, CV_8UC1);
-        cv::applyColorMap(gradient_viz_img, gradient_viz_img, cv::COLORMAP_JET);
+        // 保存单通道灰度深度图（越近越亮）
+        float min_depth = std::numeric_limits<float>::max();
+        float max_depth = std::numeric_limits<float>::lowest();
+        for (int y = 0; y < depth_buffer.rows; ++y) {
+            for (int x = 0; x < depth_buffer.cols; ++x) {
+                float d = depth_buffer.at<float>(y, x);
+                if (d != std::numeric_limits<float>::max()) {
+                    if (d < min_depth) min_depth = d;
+                    if (d > max_depth) max_depth = d;
+                }
+            }
+        }
+        // 防止无有效深度
+        if (min_depth >= max_depth) {
+            min_depth = pc_params.min_depth;
+            max_depth = pc_params.max_depth;
+        }
 
-        std::string gradient_viz_path = depth_viz_dir + "/" + std::to_string(timestamp) + "_gradient.png";
-        cv::imwrite(gradient_viz_path, gradient_viz_img);
+        cv::Mat gray_depth(depth_buffer.size(), CV_8UC1, cv::Scalar(0));
+        for (int y = 0; y < depth_buffer.rows; ++y) {
+            for (int x = 0; x < depth_buffer.cols; ++x) {
+                float d = depth_buffer.at<float>(y, x);
+                if (d == std::numeric_limits<float>::max()) {
+                    gray_depth.at<uchar>(y, x) = 0; // 无效深度为黑色
+                } else {
+                    // 归一化到[0,1]，越近越亮
+                    float norm = 1.0f - (d - min_depth) / (max_depth - min_depth);
+                    norm = std::min(std::max(norm, 0.0f), 1.0f);
+                    gray_depth.at<uchar>(y, x) = static_cast<uchar>(norm * 255.0f);
+                }
+            }
+        }
+        std::string gray_depth_path = depth_viz_dir + "/" + std::to_string(timestamp) + "_depth_gray.png";
+        cv::imwrite(gray_depth_path, gray_depth);
+        publishDepthImage(gray_depth, timestamp);
+        publishImage(undistorted_img, timestamp);
+
+        // ...existing code...
+        // **优化的梯度可视化：天空边缘用蓝色，其他边缘用红色**
+        cv::Mat simple_gradient_viz = cv::Mat::zeros(depth_viz_img.size(), CV_8UC3);
+
+        int border_size = std::max(gradient_kernel_size, sky_detection_kernel_size);
+        const int thick = 3; // 加粗半径，1表示3x3，2表示5x5
+        for (int y = border_size; y < depth_buffer.rows - border_size; y++) {
+            for (int x = border_size; x < depth_buffer.cols - border_size; x++) {
+                float depth_gradient = depth_gradient_buffer.at<float>(y, x);
+
+                if (depth_gradient > depth_discontinuity_threshold) {
+                    float center_depth = depth_buffer.at<float>(y, x);
+                    cv::Vec3b color(0, 0, 255); // 默认红色
+                    if (center_depth != std::numeric_limits<float>::max()) {
+                        int total_neighbors = 0;
+                        int invalid_neighbors = 0;
+                        for (int dy = -sky_detection_kernel_size; dy <= sky_detection_kernel_size; dy++) {
+                            for (int dx = -sky_detection_kernel_size; dx <= sky_detection_kernel_size; dx++) {
+                                if (dx == 0 && dy == 0) continue;
+                                int neighbor_x = x + dx;
+                                int neighbor_y = y + dy;
+                                if (neighbor_x >= 0 && neighbor_x < depth_buffer.cols && neighbor_y >= 0 && neighbor_y < depth_buffer.rows) {
+                                    total_neighbors++;
+                                    float neighbor_depth = depth_buffer.at<float>(neighbor_y, neighbor_x);
+                                    if (neighbor_depth == std::numeric_limits<float>::max()) {
+                                        invalid_neighbors++;
+                                    }
+                                }
+                            }
+                        }
+                        float invalid_ratio = (total_neighbors > 0) ?
+                                                  static_cast<float>(invalid_neighbors) / total_neighbors :
+                                                  0.0f;
+                        if (invalid_ratio > sky_invalid_ratio_threshold) {
+                            color = cv::Vec3b(255, 0, 0); // 蓝色
+                        }
+                    }
+                    // 加粗显示
+                    for (int dy = -thick; dy <= thick; dy++) {
+                        for (int dx = -thick; dx <= thick; dx++) {
+                            int nx = x + dx;
+                            int ny = y + dy;
+                            if (nx >= 0 && nx < simple_gradient_viz.cols && ny >= 0 && ny < simple_gradient_viz.rows) {
+                                simple_gradient_viz.at<cv::Vec3b>(ny, nx) = color;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        std::string simple_gradient_path = depth_viz_dir + "/" + std::to_string(timestamp) + "_gradient_simple.png";
+        cv::imwrite(simple_gradient_path, simple_gradient_viz);
+        // ...existing code...
     }
 
     return colored_count > 0;
 }
-
 bool CalibProcessor::saveVisualization(
     const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &colored_cloud,
     const std::vector<int> &point_color_count, const std::string &output_folder,
@@ -920,6 +1033,7 @@ bool CalibProcessor::processImagesAndPointCloud(
     const int viz_frequency = config.outputParams().viz_frequency;
     const int img_sampling_step = config.processingParams().img_sampling_step;
     const bool use_optimize = config.processingParams().use_extrinsic_optimization;
+    const bool use_time = config.processingParams().use_time;
 
     std::cout << "Using extrinsic optimization: " << (use_optimize ? "Yes" : "No") << std::endl;
 
@@ -1165,6 +1279,17 @@ bool CalibProcessor::processImagesAndPointCloud(
     auto start_time = std::chrono::high_resolution_clock::now();
     std::cout << "Starting image processing..." << std::endl;
 
+    // ===== 新增：渲染与PSNR输出目录与CSV初始化 (增加SSIM) =====
+    std::string render_dir = output_folder + "/render";
+    if (!fs::exists(render_dir)) {
+        fs::create_directories(render_dir);
+    }
+    std::string psnr_csv_path = render_dir + "/psnr.csv";
+    std::ofstream psnr_csv(psnr_csv_path);
+    if (psnr_csv.is_open()) {
+        psnr_csv << "timestamp,valid_pixels,psnr_db,ssim" << std::endl; // 增加SSIM列
+    }
+
     // Statistics tracking
     double total_colorize_time = 0.0;
     double total_update_extrinsics_time = 0.0;
@@ -1174,6 +1299,9 @@ bool CalibProcessor::processImagesAndPointCloud(
     int extrinsics_update_count = 0;
     int ros_pub_count = 0;
     int img_count = 0;
+
+    // 新增：记录每帧的外参（T_lidar_camera_update_）以便最终完整渲染
+    std::map<double, Eigen::Matrix4d> per_frame_extrinsics;
 
     // 优化的主处理循环
     for (const auto &img_data : selected_images) {
@@ -1196,8 +1324,15 @@ bool CalibProcessor::processImagesAndPointCloud(
 
             // Interpolate LiDAR pose at this timestamp
             Eigen::Matrix4d lidar_pose;
+
             if (!interpolatePose(timestamp, trajectory, lidar_pose)) {
                 continue;
+            }
+
+            if (!use_time) {
+                if (!interpolatePose(timestamp + 0.2, trajectory, lidar_pose)) {
+                    continue;
+                }
             }
 
             auto interp_end = std::chrono::high_resolution_clock::now();
@@ -1211,18 +1346,20 @@ bool CalibProcessor::processImagesAndPointCloud(
             }
 
             // Check if there are matching files for calibration update
-            if (use_optimize && match_files.find(timestamp) != match_files.end() && index_files.find(timestamp) != index_files.end()) {
-                auto update_start = std::chrono::high_resolution_clock::now();
-
-                if (updateExtrinsics(match_files[timestamp], index_files[timestamp], lidar_pose, cloud)) {
-                    extrinsics_update_count++;
+            if (use_optimize) {
+                if (match_files.find(timestamp) != match_files.end() && index_files.find(timestamp) != index_files.end()) {
+                    auto update_start = std::chrono::high_resolution_clock::now();
+                    if (updateExtrinsics(match_files[timestamp], index_files[timestamp], lidar_pose, cloud)) {
+                        extrinsics_update_count++;
+                    } else {
+                        continue;
+                    }
+                    auto update_end = std::chrono::high_resolution_clock::now();
+                    double update_time = std::chrono::duration<double>(update_end - update_start).count();
+                    total_update_extrinsics_time += update_time;
                 } else {
                     continue;
                 }
-
-                auto update_end = std::chrono::high_resolution_clock::now();
-                double update_time = std::chrono::duration<double>(update_end - update_start).count();
-                total_update_extrinsics_time += update_time;
             }
 
             // 再次检查终止信号
@@ -1230,6 +1367,9 @@ bool CalibProcessor::processImagesAndPointCloud(
                 processing_terminated = true;
                 break;
             }
+
+            // 记录本帧使用的外参（更新后的T_lidar_camera_update_）
+            per_frame_extrinsics[timestamp] = T_lidar_camera_update_;
 
             // 初始化此帧标记
             std::vector<bool> colored_in_this_frame(cloud->points.size(), false);
@@ -1311,6 +1451,123 @@ bool CalibProcessor::processImagesAndPointCloud(
 
             img_count++;
 
+            // ===== 新增：当前帧渲染并计算PSNR + SSIM =====
+            {
+                cv::Mat raw_img = cv::imread(img_path, cv::IMREAD_COLOR);
+                if (!raw_img.empty()) {
+                    cv::Mat undist_img_psnr;
+                    if (camera_model_ == "fisheye") {
+                        cv::fisheye::undistortImage(raw_img, undist_img_psnr, camera_matrix_, dist_coeffs_, newcamera_matrix_);
+                    } else {
+                        cv::undistort(raw_img, undist_img_psnr, camera_matrix_, dist_coeffs_, newcamera_matrix_);
+                    }
+                    cv::resize(undist_img_psnr, undist_img_psnr,
+                               cv::Size(resizecamera_matrix_.at<float>(0, 2) * 2,
+                                        resizecamera_matrix_.at<float>(1, 2) * 2));
+
+                    Eigen::Matrix4d camera_pose = lidar_pose * T_lidar_camera_update_.inverse();
+                    Eigen::Matrix4d world_to_camera = camera_pose.inverse();
+
+                    cv::Mat depth_buf(undist_img_psnr.size(), CV_32F, cv::Scalar(std::numeric_limits<float>::max()));
+                    cv::Mat render_img(undist_img_psnr.size(), CV_8UC3, cv::Scalar(0, 0, 0));
+
+                    for (const auto &pt : colored_cloud->points) {
+                        if (pt.r == 0 && pt.g == 0 && pt.b == 0) continue;
+                        Eigen::Vector4d pw(pt.x, pt.y, pt.z, 1.0);
+                        Eigen::Vector4d pc = world_to_camera * pw;
+                        if (pc[2] <= 0) continue;
+                        int px = static_cast<int>(resizecamera_matrix_.at<float>(0, 0) * pc[0] / pc[2] + resizecamera_matrix_.at<float>(0, 2));
+                        int py = static_cast<int>(resizecamera_matrix_.at<float>(1, 1) * pc[1] / pc[2] + resizecamera_matrix_.at<float>(1, 2));
+                        if (px < 0 || px >= render_img.cols || py < 0 || py >= render_img.rows) continue;
+                        float &z = depth_buf.at<float>(py, px);
+                        float depth = static_cast<float>(pc[2]);
+                        if (depth < z) {
+                            z = depth;
+                            render_img.at<cv::Vec3b>(py, px) = cv::Vec3b(pt.b, pt.g, pt.r);
+                        }
+                    }
+
+                    cv::Mat hole_mask(render_img.size(), CV_8U, cv::Scalar(0));
+                    for (int yy = 0; yy < depth_buf.rows; ++yy) {
+                        const float *zb = depth_buf.ptr<float>(yy);
+                        uchar *mp = hole_mask.ptr<uchar>(yy);
+                        for (int xx = 0; xx < depth_buf.cols; ++xx) {
+                            if (zb[xx] == std::numeric_limits<float>::max()) mp[xx] = 255;
+                        }
+                    }
+                    if (cv::countNonZero(hole_mask) > 0) {
+                        cv::Mat median_filtered;
+                        cv::medianBlur(render_img, median_filtered, 5);
+                        median_filtered.copyTo(render_img, hole_mask);
+                        // FIX: proper dilate usage
+                        cv::Mat dilated;
+                        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(9, 9));
+                        cv::dilate(hole_mask, dilated, kernel);
+                        cv::Mat blurred;
+                        cv::bilateralFilter(render_img, blurred, 5, 20.0, 5.0);
+                        blurred.copyTo(render_img, dilated);
+                    }
+
+                    // 计算PSNR & SSIM（仅有效且两图都非黑像素）
+                    double mse = 0.0;
+                    size_t valid = 0;
+                    double sum_x = 0.0, sum_y = 0.0, sum_x2 = 0.0, sum_y2 = 0.0, sum_xy = 0.0;
+                    for (int y = 0; y < render_img.rows; ++y) {
+                        const float *zb = depth_buf.ptr<float>(y);
+                        const cv::Vec3b *refp = undist_img_psnr.ptr<cv::Vec3b>(y);
+                        const cv::Vec3b *renp = render_img.ptr<cv::Vec3b>(y);
+                        for (int x = 0; x < render_img.cols; ++x) {
+                            if (zb[x] == std::numeric_limits<float>::max()) continue; // 未投影
+                            const cv::Vec3b &rpx = refp[x];
+                            const cv::Vec3b &opx = renp[x];
+                            if ((rpx[0] | rpx[1] | rpx[2]) == 0) continue; // 原图黑色
+                            if ((opx[0] | opx[1] | opx[2]) == 0) continue; // 渲染仍黑色
+                            for (int c = 0; c < 3; ++c) {
+                                double diff = double(rpx[c]) - double(opx[c]);
+                                mse += diff * diff;
+                            }
+                            // 灰度用于SSIM
+                            double gx = 0.114 * rpx[0] + 0.587 * rpx[1] + 0.299 * rpx[2];
+                            double gy = 0.114 * opx[0] + 0.587 * opx[1] + 0.299 * opx[2];
+                            sum_x += gx;
+                            sum_y += gy;
+                            sum_x2 += gx * gx;
+                            sum_y2 += gy * gy;
+                            sum_xy += gx * gy;
+                            valid++;
+                        }
+                    }
+                    double psnr_db = 0.0;
+                    double ssim_val = 0.0;
+                    if (valid > 0) {
+                        mse /= (valid * 3.0);
+                        if (mse > 0.0)
+                            psnr_db = 10.0 * std::log10((255.0 * 255.0) / mse);
+                        else
+                            psnr_db = 99.0;
+                        double mu_x = sum_x / valid;
+                        double mu_y = sum_y / valid;
+                        double var_x = sum_x2 / valid - mu_x * mu_x;
+                        if (var_x < 0) var_x = 0;
+                        double var_y = sum_y2 / valid - mu_y * mu_y;
+                        if (var_y < 0) var_y = 0;
+                        double cov_xy = sum_xy / valid - mu_x * mu_y;
+                        double C1 = (0.01 * 255) * (0.01 * 255);
+                        double C2 = (0.03 * 255) * (0.03 * 255);
+                        ssim_val = ((2 * mu_x * mu_y + C1) * (2 * cov_xy + C2)) / ((mu_x * mu_x + mu_y * mu_y + C1) * (var_x + var_y + C2));
+                    }
+
+                    std::string render_path = render_dir + "/" + std::to_string(timestamp) + "_render.png";
+                    cv::imwrite(render_path, render_img);
+
+                    if (psnr_csv.is_open()) {
+                        psnr_csv << std::fixed << std::setprecision(9)
+                                 << timestamp << "," << valid << ","
+                                 << std::setprecision(6) << psnr_db << "," << ssim_val << std::endl;
+                    }
+                }
+            }
+            // ===== 渲染与PSNR+SSIM结束 =====
         } catch (const std::exception &e) {
             std::cerr << "Error processing image " << img_path << ": " << e.what() << std::endl;
             continue;
@@ -1321,6 +1578,7 @@ bool CalibProcessor::processImagesAndPointCloud(
     if (processing_terminated) {
         std::cout << "\n========== GRACEFUL TERMINATION ==========" << std::endl;
         std::cout << "Processing interrupted by user request." << std::endl;
+        if (psnr_csv.is_open()) psnr_csv.close();
 
         // 计算处理时间
         auto end_time = std::chrono::high_resolution_clock::now();
@@ -1398,6 +1656,151 @@ bool CalibProcessor::processImagesAndPointCloud(
     // 最终保存和报告
     std::string progress_info = "Processing complete. Processed " + std::to_string(img_count) + " images out of " + std::to_string(selected_images.size());
     saveVisualization(colored_cloud, point_color_count, output_folder, progress_info);
+
+    // 新增：完成后用最终彩色点云 + 每帧外参渲染，图像更完整
+    try {
+        std::string final_render_dir = output_folder + "/render_final";
+        if (!fs::exists(final_render_dir)) fs::create_directories(final_render_dir);
+        std::string csv_path = final_render_dir + "/psnr_final.csv";
+        std::ofstream psnr_csv_final(csv_path);
+        if (psnr_csv_final.is_open()) {
+            psnr_csv_final << "timestamp,valid_pixels,psnr_db,ssim" << std::endl; // 修改最终CSV头
+        }
+
+        for (const auto &img_data : selected_images) {
+            double ts = img_data.first;
+            const std::string &img_path = img_data.second;
+
+            // 读并去畸变图
+            cv::Mat img = cv::imread(img_path, cv::IMREAD_COLOR);
+            if (img.empty()) continue;
+            cv::Mat undist_img;
+            if (camera_model_ == "fisheye") {
+                cv::fisheye::undistortImage(img, undist_img, camera_matrix_, dist_coeffs_, newcamera_matrix_);
+            } else {
+                cv::undistort(img, undist_img, camera_matrix_, dist_coeffs_, newcamera_matrix_);
+            }
+            cv::resize(undist_img, undist_img,
+                       cv::Size(resizecamera_matrix_.at<float>(0, 2) * 2,
+                                resizecamera_matrix_.at<float>(1, 2) * 2));
+
+            // 插值获得该帧LiDAR位姿
+            Eigen::Matrix4d lidar_pose;
+            if (!interpolatePose(ts, trajectory, lidar_pose)) continue;
+
+            // 取该帧记录的外参（若无则使用最终外参）
+            Eigen::Matrix4d T_lc = T_lidar_camera_update_;
+            auto it = per_frame_extrinsics.find(ts);
+            if (it != per_frame_extrinsics.end()) T_lc = it->second;
+
+            // 相机位姿
+            Eigen::Matrix4d camera_pose = lidar_pose * T_lc.inverse();
+            Eigen::Matrix4d world_to_camera = camera_pose.inverse();
+
+            // 渲染缓冲
+            cv::Mat depth_buf(undist_img.size(), CV_32F, cv::Scalar(std::numeric_limits<float>::max()));
+            cv::Mat render_img(undist_img.size(), CV_8UC3, cv::Scalar(0, 0, 0));
+
+            // Z-buffer投影
+            for (const auto &pt : colored_cloud->points) {
+                if (pt.r == 0 && pt.g == 0 && pt.b == 0) continue;
+                Eigen::Vector4d pw(pt.x, pt.y, pt.z, 1.0);
+                Eigen::Vector4d pc = world_to_camera * pw;
+                if (pc[2] <= 0) continue;
+                int px = static_cast<int>(resizecamera_matrix_.at<float>(0, 0) * pc[0] / pc[2] + resizecamera_matrix_.at<float>(0, 2));
+                int py = static_cast<int>(resizecamera_matrix_.at<float>(1, 1) * pc[1] / pc[2] + resizecamera_matrix_.at<float>(1, 2));
+                if (px < 0 || px >= render_img.cols || py < 0 || py >= render_img.rows) continue;
+                float &z = depth_buf.at<float>(py, px);
+                float depth = static_cast<float>(pc[2]);
+                if (depth < z) {
+                    z = depth;
+                    render_img.at<cv::Vec3b>(py, px) = cv::Vec3b(pt.b, pt.g, pt.r);
+                }
+            }
+
+            // 按fillHoles思想做中值填孔 + 局部平滑
+            cv::Mat hole_mask(render_img.size(), CV_8U, cv::Scalar(0));
+            for (int yy = 0; yy < depth_buf.rows; ++yy) {
+                const float *zb = depth_buf.ptr<float>(yy);
+                uchar *mp = hole_mask.ptr<uchar>(yy);
+                for (int xx = 0; xx < depth_buf.cols; ++xx) {
+                    if (zb[xx] == std::numeric_limits<float>::max()) mp[xx] = 255;
+                }
+            }
+            if (cv::countNonZero(hole_mask) > 0) {
+                cv::Mat median_filtered;
+                cv::medianBlur(render_img, median_filtered, 5);
+                median_filtered.copyTo(render_img, hole_mask);
+                // FIX: proper dilate usage
+                cv::Mat dilated;
+                cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(7, 7));
+                cv::dilate(hole_mask, dilated, kernel);
+                cv::Mat blurred;
+                cv::bilateralFilter(render_img, blurred, 5, 20.0, 5.0);
+                blurred.copyTo(render_img, dilated);
+            }
+
+            // 计算PSNR & SSIM（仅有效投影且两图非黑像素）
+            double mse = 0.0;
+            size_t valid = 0;
+            double sum_x = 0.0, sum_y = 0.0, sum_x2 = 0.0, sum_y2 = 0.0, sum_xy = 0.0;
+            for (int y = 0; y < render_img.rows; ++y) {
+                const float *zb = depth_buf.ptr<float>(y);
+                const cv::Vec3b *refp = undist_img.ptr<cv::Vec3b>(y);
+                const cv::Vec3b *renp = render_img.ptr<cv::Vec3b>(y);
+                for (int x = 0; x < render_img.cols; ++x) {
+                    if (zb[x] == std::numeric_limits<float>::max()) continue;
+                    const cv::Vec3b &rpx = refp[x];
+                    const cv::Vec3b &opx = renp[x];
+                    if ((rpx[0] | rpx[1] | rpx[2]) == 0) continue;
+                    if ((opx[0] | opx[1] | opx[2]) == 0) continue;
+                    for (int c = 0; c < 3; ++c) {
+                        double diff = double(rpx[c]) - double(opx[c]);
+                        mse += diff * diff;
+                    }
+                    double gx = 0.114 * rpx[0] + 0.587 * rpx[1] + 0.299 * rpx[2];
+                    double gy = 0.114 * opx[0] + 0.587 * opx[1] + 0.299 * opx[2];
+                    sum_x += gx;
+                    sum_y += gy;
+                    sum_x2 += gx * gx;
+                    sum_y2 += gy * gy;
+                    sum_xy += gx * gy;
+                    valid++;
+                }
+            }
+            double psnr_db = 0.0;
+            double ssim_val = 0.0;
+            if (valid > 0) {
+                mse /= (valid * 3.0);
+                psnr_db = (mse > 0.0) ? 10.0 * std::log10((255.0 * 255.0) / mse) : 99.0;
+                double mu_x = sum_x / valid;
+                double mu_y = sum_y / valid;
+                double var_x = sum_x2 / valid - mu_x * mu_x;
+                if (var_x < 0) var_x = 0;
+                double var_y = sum_y2 / valid - mu_y * mu_y;
+                if (var_y < 0) var_y = 0;
+                double cov_xy = sum_xy / valid - mu_x * mu_y;
+                double C1 = (0.01 * 255) * (0.01 * 255);
+                double C2 = (0.03 * 255) * (0.03 * 255);
+                ssim_val = ((2 * mu_x * mu_y + C1) * (2 * cov_xy + C2)) / ((mu_x * mu_x + mu_y * mu_y + C1) * (var_x + var_y + C2));
+            }
+
+            // 保存渲染图与记录CSV
+            std::string render_path = final_render_dir + "/" + std::to_string(ts) + "_render.png";
+            cv::imwrite(render_path, render_img);
+            if (psnr_csv_final.is_open()) {
+                psnr_csv_final << std::fixed << std::setprecision(9) << ts << "," << valid << ","
+                               << std::setprecision(6) << psnr_db << "," << ssim_val << std::endl;
+            }
+        }
+        if (psnr_csv_final.is_open()) psnr_csv_final.close();
+        std::cout << "Final render images saved to: " << final_render_dir << ", PSNR CSV: " << csv_path << std::endl;
+    } catch (const std::exception &e) {
+        std::cerr << "Error during final rendering: " << e.what() << std::endl;
+    }
+
+    const std::string &camera_model = Config::getInstance().cameraParams().camera_model;
+    const auto &proj_params2 = Config::getInstance().projectionParams();
 
     // Clear the stored pointers as we're done
     if (output_cloud_ptr) {
@@ -2353,9 +2756,9 @@ void CalibProcessor::publishCameraPose(const Eigen::Matrix4d &camera_pose,
     camera_marker.pose.orientation.w = q.w();
 
     // Set the scale (size of the camera visualization)
-    camera_marker.scale.x = 0.5; // Increased width from 0.1
-    camera_marker.scale.y = 0.5; // Increased height from 0.1
-    camera_marker.scale.z = 0.2; // Increased thickness from 0.05
+    camera_marker.scale.x = 0.2; // Increased width from 0.1
+    camera_marker.scale.y = 0.2; // Increased height from 0.1
+    camera_marker.scale.z = 0.1; // Increased thickness from 0.05
 
     // Set the color
     camera_marker.color.r = 0.8;
@@ -2378,17 +2781,17 @@ void CalibProcessor::publishCameraPose(const Eigen::Matrix4d &camera_pose,
     frustum_marker.type = visualization_msgs::Marker::LINE_LIST;
     frustum_marker.action = visualization_msgs::Marker::ADD;
     frustum_marker.pose.orientation.w = 1.0; // Identity quaternion
-    frustum_marker.scale.x = 0.025;          // Increased line width from 0.01
+    frustum_marker.scale.x = 0.05;           // Increased line width from 0.01
     frustum_marker.color.g = 0.8;
     frustum_marker.color.b = 0.8;
     frustum_marker.color.a = 1.0;
     frustum_marker.lifetime = ros::Duration(0); // 0 means forever
 
     // Define frustum size - make the camera model larger
-    double near_plane = 0;   // Increased from 0.05
-    double far_plane = 2;    // Increased from 0.3
-    double fov_width = 1.0;  // Increased from 0.15
-    double fov_height = 0.5; // Increased from 0.10
+    double near_plane = 0;    // Increased from 0.05
+    double far_plane = 1;     // Increased from 0.3
+    double fov_width = 0.5;   // Increased from 0.15
+    double fov_height = 0.25; // Increased from 0.10
 
     // Near plane corners in camera coordinates (Z forward)
     Eigen::Vector3d near_top_right(fov_width * near_plane / far_plane,
@@ -2463,7 +2866,7 @@ void CalibProcessor::publishCameraPose(const Eigen::Matrix4d &camera_pose,
     axes_marker.action = visualization_msgs::Marker::ADD;
     axes_marker.pose.position = camera_marker.pose.position;
     axes_marker.pose.orientation = camera_marker.pose.orientation;
-    axes_marker.scale.x = 0.2;               // Increased line width from 0.02
+    axes_marker.scale.x = 0.02;              // Increased line width from 0.02
     axes_marker.lifetime = ros::Duration(0); // 0 means forever
 
     // Define axis lengths
@@ -2537,6 +2940,25 @@ void CalibProcessor::publishCameraPose(const Eigen::Matrix4d &camera_pose,
     camera_trajectory_pub_.publish(path_msg);
 }
 
+void CalibProcessor::publishDepthImage(const cv::Mat &depth_image, double timestamp) {
+    if (!ros_initialized_ || !nh_) {
+        return;
+    }
+
+    // Convert OpenCV image to ROS message
+    sensor_msgs::ImagePtr img_msg =
+        cv_bridge::CvImage(std_msgs::Header(), "mono8", depth_image).toImageMsg();
+
+    // Set timestamp
+    img_msg->header.stamp = ros::Time(timestamp);
+    img_msg->header.frame_id = "camera";
+
+    // Publish the image
+    depth_image_pub_.publish(img_msg);
+
+    ROS_DEBUG("Published depth image");
+}
+
 void CalibProcessor::publishMatchImage(const std::string &image_path,
                                        double timestamp) {
     if (!ros_initialized_ || !nh_) {
@@ -2563,5 +2985,24 @@ void CalibProcessor::publishMatchImage(const std::string &image_path,
     match_image_pub_.publish(img_msg);
 
     ROS_DEBUG("Published match visualization image");
+}
+
+void CalibProcessor::publishImage(const cv::Mat &image, double timestamp) {
+    if (!ros_initialized_ || !nh_) {
+        return;
+    }
+
+    // Convert OpenCV image to ROS message
+    sensor_msgs::ImagePtr img_msg =
+        cv_bridge::CvImage(std_msgs::Header(), "bgr8", image).toImageMsg();
+
+    // Set timestamp
+    img_msg->header.stamp = ros::Time(timestamp);
+    img_msg->header.frame_id = "camera";
+
+    // Publish the image
+    image_pub_.publish(img_msg);
+
+    ROS_DEBUG("Published image");
 }
 } // namespace lvmapping

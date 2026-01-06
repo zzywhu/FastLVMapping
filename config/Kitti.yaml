@@ -76,7 +76,8 @@ output_params:
 processing_params:
    img_sampling_step: 3    # Step size for image sampling (e.g., 2 means every other image)
    preprocess_sampling_step: 3  # Step size for preprocessing (every other image)
-   use_extrinsic_optimization: true 
+   use_extrinsic_optimization: 1 # 是否使用外参优化
+   use_time: 1                    # 是否使用时间信息
 
 # Depth processing parameters
 depth_params:

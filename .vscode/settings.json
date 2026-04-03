@@ -59,5 +59,13 @@
         "thread": "cpp",
         "typeinfo": "cpp",
         "deque": "cpp"
-    }
+    },
+    "python.autoComplete.extraPaths": [
+        "/home/zzy/ros_driver/devel/lib/python3/dist-packages",
+        "/opt/ros/noetic/lib/python3/dist-packages"
+    ],
+    "python.analysis.extraPaths": [
+        "/home/zzy/ros_driver/devel/lib/python3/dist-packages",
+        "/opt/ros/noetic/lib/python3/dist-packages"
+    ]
 }
